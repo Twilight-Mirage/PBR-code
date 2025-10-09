@@ -8,10 +8,6 @@ from pathlib import Path
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components
 
-# 自动获取 personabench 的绝对路径（跨平台兼容）
-personabench_path = str(Path(__file__).parent.parent.parent)
-sys.path.insert(0, personabench_path) 
-
 import time
 import argparse
 import faiss
@@ -39,9 +35,6 @@ def load_json_res(res):
         json_str = match.group(1)
         try:
             data = json.loads(json_str)
-            # print("Locutionary:", data["locutionary"])
-            # print("Illocutionary:", data["illocutionary"])
-            # print("Perlocutionary:", data["perlocutionary"])
         except json.JSONDecodeError as e:
             data = {}
             print("error in transform json", e)
@@ -161,7 +154,6 @@ class RAGRetriever:
                     user_data.append(item['content'])
             tmp_data = {
                 'date': ts,
-                # 'conversation':sess_entry
                 'conversation':user_data
             }
             segment_id = cur_sess_id
@@ -283,9 +275,6 @@ class RAGRetriever:
         return D, I, retrieved_chunks, rankings_id
 
     def query_fake_ada_reason(self, fake, reason, question, top_k=5):
-        """
-        输入 questions (list of str)，返回 top_k 检索结果。
-        """
         if self.index is None:
             raise ValueError("Index has not been built. Please call build_index() first.")
         # best version
@@ -363,7 +352,6 @@ if __name__ == "__main__":
             tmp_rank = {
                     'corpus_id': ids,
                     'text': res,
-                    # 'timestamp': corpus_timestamps[rid]
                 }
             rankings.append(ids)
             ret_res.append(tmp_rank)
@@ -424,6 +412,5 @@ if __name__ == "__main__":
             averaged_results['session'][k] = np.mean(results_list)
         except:
             continue
-    # print(cur_results['retrieval_results'])
     print(json.dumps(averaged_results))
     save_json(out_json,save_path)
