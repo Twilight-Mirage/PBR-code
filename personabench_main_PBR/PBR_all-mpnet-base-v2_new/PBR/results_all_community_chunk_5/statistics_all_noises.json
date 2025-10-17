@@ -1,0 +1,63 @@
+[
+    {
+        "Noise": 0.0,
+        "Statistics": {
+            "end2end_eval": {
+                "gpt-4o-mini+multi-qa-MiniLM-L6-cos-v1": {
+                    "Overall": {
+                        "ave_precision": 0.0,
+                        "ave_recall": 0.0,
+                        "ave_f1": 0.0
+                    },
+                    "outdated_information": {
+                        "ave_recall": 0.0
+                    },
+                    "Basic_information_easy": {
+                        "ave_precision": 0.0,
+                        "ave_recall": 0.0,
+                        "ave_f1": 0.0
+                    },
+                    "Preference_hard": {
+                        "ave_precision": 0.0,
+                        "ave_recall": 0.0,
+                        "ave_f1": 0.0
+                    },
+                    "Social_easy": {
+                        "ave_precision": 0.0,
+                        "ave_recall": 0.0,
+                        "ave_f1": 0.0
+                    },
+                    "Preference_easy": {
+                        "ave_precision": 0.0,
+                        "ave_recall": 0.0,
+                        "ave_f1": 0.0
+                    }
+                }
+            },
+            "retrieval_eval": {
+                "multi-qa-MiniLM-L6-cos-v1": {
+                    "Overall": {
+                        "ave_recall": 0.5113,
+                        "ave_ndcg": 0.4244
+                    },
+                    "Basic_information_easy": {
+                        "ave_recall": 0.5227,
+                        "ave_ndcg": 0.3669
+                    },
+                    "Preference_hard": {
+                        "ave_recall": 0.4293,
+                        "ave_ndcg": 0.4309
+                    },
+                    "Social_easy": {
+                        "ave_recall": 0.5503,
+                        "ave_ndcg": 0.5044
+                    },
+                    "Preference_easy": {
+                        "ave_recall": 0.5128,
+                        "ave_ndcg": 0.4947
+                    }
+                }
+            }
+        }
+    }
+]

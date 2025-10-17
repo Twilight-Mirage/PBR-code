@@ -44,7 +44,7 @@ You’ll need:
 	•	a valid OpenAI API Key (for gpt-4o-mini)
 
 
-## 📚 Usage
+## 📚 Usage - LongMemEval
 ### 1. download data
 you need to download LongMemEval data to this dictionary form https://github.com/xiaowu0162/LongMemEval. 
 
@@ -56,5 +56,38 @@ python -u ./src/retrieval/retrieval_PBR.py \
     --model_type="PBR" \
     --retrieval_model_name="multi-qa-MiniLM-L6-cos-v1" \
     --data_type='s'
+
+```
+
+## 📚 Usage - personabench
+### 1. run the code
+```bash
+cd ./personabench_main_PBR
+SEED=2024
+MODEL_TYPE="PBR" # fake_ada_reason_fake_10
+LOG_DIR="PBR_all-mpnet-base-v2_new"
+DATA_DIR="eval_data/eval_data_v1"
+SAVE_DIR="PBR" 
+TEST_COMMUNITY_IDS="community_0,community_1"
+NUM_CHUNKS=5
+BASE_MODELS="gpt-4o-mini"
+RETRIEVERS="multi-qa-MiniLM-L6-cos-v1"
+TEST_NOISES="0.0"
+VERBOSE="--verbose"
+
+
+
+CUDA_VISIBLE_DEVICES="0" python scripts/evaluation/eval_rag_PBR.py \
+    --seed $SEED \
+    --log_dir $LOG_DIR \
+    --model_type $MODEL_TYPE \
+    --data_dir $DATA_DIR \
+    --save_dir $SAVE_DIR \
+    --test_community_ids $TEST_COMMUNITY_IDS \
+    --num_chunks $NUM_CHUNKS \
+    --model_name $BASE_MODELS \
+    --retrieval_model $RETRIEVERS \
+    --noise $TEST_NOISES \
+    $VERBOSE
 
 ```

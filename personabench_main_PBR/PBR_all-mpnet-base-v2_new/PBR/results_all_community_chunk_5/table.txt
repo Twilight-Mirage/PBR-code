@@ -1,0 +1,20 @@
+
+
+==============  EVAL RETRIEVERS AT NOISE 0.0 ===========================
+----------- retriever model: multi-qa-MiniLM-L6-cos-v1 -----------------
+Basic_information: {'ave_recall': 0.5227, 'ave_ndcg': 0.3669}
+Preference_easy: {'ave_recall': 0.5128, 'ave_ndcg': 0.4947}
+Preference_hard: {'ave_recall': 0.4293, 'ave_ndcg': 0.4309}
+Social: {'ave_recall': 0.5503, 'ave_ndcg': 0.5044}
+Overall: {'ave_recall': 0.5113, 'ave_ndcg': 0.4244}
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+
+==============  EVAL RAG AT NOISE 0.0 ===========================
+----------- RAG model: gpt-4o-mini+multi-qa-MiniLM-L6-cos-v1 -----------------
+Basic_information: {'ave_precision': 0.0, 'ave_recall': 0.0, 'ave_f1': 0.0}
+Preference_easy: {'ave_precision': 0.0, 'ave_recall': 0.0, 'ave_f1': 0.0}
+Preference_hard: {'ave_precision': 0.0, 'ave_recall': 0.0, 'ave_f1': 0.0}
+Social: {'ave_precision': 0.0, 'ave_recall': 0.0, 'ave_f1': 0.0}
+Overall: {'ave_precision': 0.0, 'ave_recall': 0.0, 'ave_f1': 0.0}
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
