@@ -1,6 +1,6 @@
 # PBR: Personalize-Before-Retrieve Framework for User-Centric Retrieval
 
-This is repository provides the official implementation of the paper:
+This is repository provides the official implementation of the `AAAI 2026 Oral` paper:
 
 **Personalize Before Retrieve: LLM-based Personalized Query Expansion for User-Centric Retrieval**  
 
@@ -90,4 +90,15 @@ CUDA_VISIBLE_DEVICES="0" python scripts/evaluation/eval_rag_PBR.py \
     --noise $TEST_NOISES \
     $VERBOSE
 
+```
+
+### 📖 Citation
+If you find this work helpful, please cite:
+```bibtex
+@article{zhang2025personalize,
+  title={Personalize Before Retrieve: LLM-based Personalized Query Expansion for User-Centric Retrieval},
+  author={Zhang, Yingyi and Jia, Pengyue and Xu, Derong and Wen, Yi and Li, Xianneng and Wang, Yichao and Zhang, Wenlin and Li, Xiaopeng and Gan, Weinan and Guo, Huifeng and others},
+  journal={arXiv preprint arXiv:2510.08935},
+  year={2025}
+}
 ```
