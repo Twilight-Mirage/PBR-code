@@ -1,16 +1,16 @@
-# PBR: Personalize-Before-Retrieve Framework for User-Centric Retrieval
+﻿# PBR: Personalize-Before-Retrieve Framework for User-Centric Retrieval
 
 This is repository provides the official implementation of the `AAAI 2026 Oral` paper:
 
 **Personalize Before Retrieve: LLM-based Personalized Query Expansion for User-Centric Retrieval**  
 
-![论文图片](./assets/main_framework.png)
+![璁烘枃鍥剧墖](./assets/main_framework.png)
 
 ---
 
-## 🌟 Overview
+## 馃専 Overview
 
-This project implements **PBR (Personalize Before Retrieve)** — a novel framework for personalized query expansion in Retrieval-Augmented Generation (RAG) systems. Unlike traditional expansion methods, PBR adapts to **individual user styles and corpus structures** before retrieval.
+This project implements **PBR (Personalize Before Retrieve)** 鈥?a novel framework for personalized query expansion in Retrieval-Augmented Generation (RAG) systems. Unlike traditional expansion methods, PBR adapts to **individual user styles and corpus structures** before retrieval.
 
 PBR consists of two core modules:
 
@@ -21,16 +21,16 @@ We evaluate PBR on two personalized benchmarks: **PersonaBench** and **LongMemEv
 
 ---
 
-## 🧠 Key Features
+## 馃 Key Features
 
-- 🔁 **LLM-based query expansion** with style-aware feedback and reasoning simulation
-- 🧩 **Graph-enhanced memory retrieval** via PageRank and embedding fusion
-- 🧪 Full evaluation pipeline with ablation, baselines, and parameter sensitivity
-- 📊 Compatible with retrievers like `multi-qa-MiniLM`, `all-MiniLM`, `bge-base-en`
+- 馃攣 **LLM-based query expansion** with style-aware feedback and reasoning simulation
+- 馃З **Graph-enhanced memory retrieval** via PageRank and embedding fusion
+- 馃И Full evaluation pipeline with ablation, baselines, and parameter sensitivity
+- 馃搳 Compatible with retrievers like `multi-qa-MiniLM`, `all-MiniLM`, `bge-base-en`
 
 ---
 
-## 📦 Installation
+## 馃摝 Installation
 
 Install required packages:
 
@@ -38,13 +38,13 @@ Install required packages:
 pip install -r requirements.txt
 ```
 
-You’ll need:
-	•	sentence-transformers, faiss-cpu
-	•	openai, cvxpy, scikit-learn, ot, numpy, scipy
-	•	a valid OpenAI API Key (for gpt-4o-mini)
+You鈥檒l need:
+	鈥?sentence-transformers, faiss-cpu
+	鈥?openai, cvxpy, scikit-learn, ot, numpy, scipy
+	鈥?a valid OpenAI API Key (for gpt-4o-mini)
 
 
-## 📚 Usage - LongMemEval
+## 馃摎 Usage - LongMemEval
 ### 1. download data
 you need to download LongMemEval data to this dictionary form https://github.com/xiaowu0162/LongMemEval. 
 
@@ -59,7 +59,7 @@ python -u ./src/retrieval/retrieval_PBR.py \
 
 ```
 
-## 📚 Usage - personabench
+## 馃摎 Usage - personabench
 ### 1. run the code
 ```bash
 cd ./personabench_main_PBR
@@ -92,7 +92,7 @@ CUDA_VISIBLE_DEVICES="0" python scripts/evaluation/eval_rag_PBR.py \
 
 ```
 
-### 📖 Citation
+### 馃摉 Citation
 If you find this work helpful, please cite:
 ```bibtex
 @article{zhang2025personalize,
@@ -102,3 +102,41 @@ If you find this work helpful, please cite:
   year={2025}
 }
 ```
+## Temporal Profile Extension (PBR++)
+
+The retrieval pipeline now supports a temporal-evolving user profile:
+
+- time decay: exp(-lambda * age_days)
+- usage-aware weighting: sigmoid(alpha * utility)
+- temporal graph center: short-term and long-term anchor blending
+- temporal rerank: rerank over FAISS candidates with temporal weights
+
+Example:
+
+```bash
+python -u ./src/retrieval/retrieval_PBR.py \
+    --model_type="PBR++" \
+    --temporal_profile \
+    --temporal_decay_lambda=0.05 \
+    --temporal_util_alpha=4.0 \
+    --temporal_util_bias=0.0 \
+    --temporal_rerank_beta=0.4 \
+    --temporal_graph_decay=0.02 \
+    --short_term_blend=0.5 \
+    --k_seed=10 \
+    --top_k_retrieval=10 \
+    --retrieval_model_name="multi-qa-MiniLM-L6-cos-v1" \
+    --data_type='s' \
+    --save_suffix="_exp_temporal"
+```
+
+## Fast Comparison Workflow
+
+Use `experiments/` for reproducible ablations:
+
+```bash
+python experiments/run_retrieval_matrix.py --matrix experiments/configs/longmemeval_temporal_matrix.json
+python experiments/summarize_retrieval_results.py --glob "data/longmemeval_data/*_PBR*.json"
+```
+
+
