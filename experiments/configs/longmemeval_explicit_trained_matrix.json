@@ -1,0 +1,37 @@
+{
+  "global": {
+    "data_type": "s",
+    "retrieval_model_name": "multi-qa-MiniLM-L6-cos-v1",
+    "k_seed": 10,
+    "top_k_retrieval": 10,
+    "seed_candidate_multiplier": 4
+  },
+  "experiments": [
+    {
+      "name": "pbr_base",
+      "model_type": "PBR",
+      "temporal_profile": false,
+      "cold_start_router": false,
+      "explicit_profile": false,
+      "save_suffix": "_exp_pbr_base",
+      "args": {}
+    },
+    {
+      "name": "pbr_explicit_trained_encoder",
+      "model_type": "PBR",
+      "temporal_profile": false,
+      "cold_start_router": false,
+      "explicit_profile": true,
+      "save_suffix": "_exp_explicit_trained",
+      "args": {
+        "explicit_profile_mix": 0.25,
+        "explicit_feature_topk": 12,
+        "explicit_seed_feature_alpha": 0.15,
+        "explicit_rerank_alpha": 0.2,
+        "contrastive_examples_k": 2,
+        "explicit_encoder_ckpt": "./data/longmemeval_data/explicit_user_encoder_s.pt",
+        "explicit_encoder_device": "cpu"
+      }
+    }
+  ]
+}

@@ -16,6 +16,13 @@ from tqdm import tqdm
 from async_llm import run_async
 from src.retrieval.cold_start_router import ColdStartRouter, l2_normalize, load_prototype_bank
 from src.retrieval.eval_utils import evaluate_retrieval
+from src.retrieval.explicit_profile_utils import (
+    build_explicit_feature_profile,
+    render_contrastive_block,
+    render_explicit_feature_block,
+    select_contrastive_examples,
+)
+from src.retrieval.explicit_user_encoder import ExplicitUserEncoderAdapter
 
 
 def load_json_res(res):
@@ -49,13 +56,23 @@ def save_json(data, file_path):
             raise TypeError("Data must be a list/dictionary or a JSON string")
 
 
-def gen_retrieval_prompt_fake_ada_reason_10(query, doc, model):
+def gen_retrieval_prompt_fake_ada_reason_10(query, doc, model, explicit_feature_block="", contrastive_block=""):
+    aux_sections = []
+    if isinstance(explicit_feature_block, str) and explicit_feature_block.strip():
+        aux_sections.append(explicit_feature_block.strip())
+    if isinstance(contrastive_block, str) and contrastive_block.strip():
+        aux_sections.append(contrastive_block.strip())
+    aux_context = "\n\n".join(aux_sections) if aux_sections else "None"
+
     prompt_template = """You are to generate 10 natural candidate utterances the user might say, inspired by the dialogue history and the current question.
 
 Context
 ------------
 User dialogue history (for style imitation):  
 {history}
+
+Explicit personalization signals:
+{aux_context}
 
 Current question (to inspire the utterances):  
 {query}
@@ -66,7 +83,8 @@ Guidelines
 2. Do NOT just paraphrase; include variations in tone, emphasis, or context.
 3. Each > 25 words.
 4. Reflect the style and tone consistent with the document.
-5. Return ONLY valid JSON in this format (no comments, no markdown):
+5. Respect explicit user features; treat contrastive references as negative clues.
+6. Return ONLY valid JSON in this format (no comments, no markdown):
    {{
      "candidates": [
        "...",
@@ -75,7 +93,7 @@ Guidelines
      ]
    }}
 """
-    instruction = prompt_template.format(query=query, history=doc)
+    instruction = prompt_template.format(query=query, history=doc, aux_context=aux_context)
     p_utt_prompt = instruction
     prompt_template = """Solve the question step-by-step, inspired by the user dialogue history.
 
@@ -84,12 +102,15 @@ Context
 User dialogue history (for style imitation):  
 {history}
 
+Explicit personalization signals:
+{aux_context}
+
 Current question (to inspire the utterances):  
 {query}
 ------------
 Output (step-by-step):
 """
-    instruction = prompt_template.format(query=query, history=doc)
+    instruction = prompt_template.format(query=query, history=doc, aux_context=aux_context)
     p_rea_prompt = instruction
 
     return p_utt_prompt, p_rea_prompt
@@ -138,7 +159,15 @@ def safe_parse_datetime(value):
 
 
 class RAGRetriever:
-    def __init__(self, retriever_model, retriever_model_name, data_type="s", temporal_cfg=None, coldstart_cfg=None):
+    def __init__(
+        self,
+        retriever_model,
+        retriever_model_name,
+        data_type="s",
+        temporal_cfg=None,
+        coldstart_cfg=None,
+        explicit_cfg=None,
+    ):
         self.retriever_model = retriever_model
         self.index = None
         self.chunks = []
@@ -187,6 +216,38 @@ class RAGRetriever:
             "mode": "individual",
             "reason": "router_not_used",
         }
+
+        explicit_cfg = explicit_cfg or {}
+        self.enable_explicit_profile = bool(explicit_cfg.get("enable_explicit_profile", False))
+        self.explicit_profile_mix = float(explicit_cfg.get("explicit_profile_mix", 0.25))
+        self.explicit_seed_feature_alpha = float(explicit_cfg.get("explicit_seed_feature_alpha", 0.15))
+        self.explicit_rerank_alpha = float(explicit_cfg.get("explicit_rerank_alpha", 0.2))
+        self.explicit_feature_topk = int(explicit_cfg.get("explicit_feature_topk", 12))
+        self.contrastive_examples_k = int(explicit_cfg.get("contrastive_examples_k", 2))
+        self.contrastive_max_words = int(explicit_cfg.get("contrastive_max_words", 90))
+        self.contrastive_external_only = bool(explicit_cfg.get("contrastive_external_only", False))
+        self.explicit_debug = bool(explicit_cfg.get("explicit_debug", False))
+        self.explicit_encoder_ckpt = str(explicit_cfg.get("explicit_encoder_ckpt", "")).strip()
+        self.explicit_encoder_device = str(explicit_cfg.get("explicit_encoder_device", "cpu"))
+        self.explicit_encoder_meta = {"mode": "base_retriever_only"}
+        self.explicit_encoder_adapter = None
+        if self.explicit_encoder_ckpt:
+            self.explicit_encoder_adapter = ExplicitUserEncoderAdapter.from_checkpoint(
+                ckpt_path=self.explicit_encoder_ckpt,
+                map_location=self.explicit_encoder_device,
+            )
+            self.explicit_encoder_meta = {
+                "mode": "projector_loaded",
+                "meta": self.explicit_encoder_adapter.meta,
+            }
+
+        self.history_plain_texts = []
+        self.history_turns_per_session = []
+        self.explicit_feature_profile = {}
+        self.explicit_feature_text = ""
+        self.explicit_feature_embedding = None
+        self.contrastive_examples = []
+        self.contrastive_block = ""
 
     def _estimate_session_utility(self, sess_entry):
         user_turns = [x.get("content", "") for x in sess_entry if x.get("role") == "user"]
@@ -259,6 +320,10 @@ class RAGRetriever:
             if self.cold_start_route_info.get("mode") in {"cohort_only", "blend"}:
                 weighted_scores = weighted_scores * (1 + self.cold_start_seed_profile_alpha * profile_sim)
 
+        if self.enable_explicit_profile and self.explicit_feature_embedding is not None:
+            feature_sim = cosine_similarity(self.memory_embeddings, self.explicit_feature_embedding[None, :]).squeeze()
+            weighted_scores = weighted_scores * (1 + self.explicit_seed_feature_alpha * feature_sim)
+
         idx = np.argsort(weighted_scores)[::-1][:top_k]
         d_scores = weighted_scores[idx][None, :].astype(np.float32)
         i_rankings = idx[None, :].astype(np.int64)
@@ -309,8 +374,33 @@ class RAGRetriever:
                 reranked_D.append(np.array([], dtype=np.float32))
                 reranked_I.append(np.array([], dtype=np.int64))
                 continue
-            profile_scores = cosine_similarity(self.memory_embeddings[valid_idx], self.user_profile_embedding[None, :]).squeeze()
+            profile_scores = np.atleast_1d(
+                cosine_similarity(self.memory_embeddings[valid_idx], self.user_profile_embedding[None, :]).squeeze()
+            )
             mixed_scores = (1 - self.cold_start_rerank_alpha) * valid_scores + self.cold_start_rerank_alpha * profile_scores
+            order = np.argsort(mixed_scores)[::-1][:top_k]
+            reranked_D.append(mixed_scores[order].astype(np.float32))
+            reranked_I.append(valid_idx[order].astype(np.int64))
+        return np.stack(reranked_D), np.stack(reranked_I)
+
+    def _explicit_rerank(self, D, I, top_k):
+        if (not self.enable_explicit_profile) or (self.explicit_feature_embedding is None):
+            return D[:, :top_k], I[:, :top_k]
+
+        reranked_D = []
+        reranked_I = []
+        for row in range(I.shape[0]):
+            valid_mask = I[row] >= 0
+            valid_idx = I[row][valid_mask]
+            valid_scores = D[row][valid_mask]
+            if len(valid_idx) == 0:
+                reranked_D.append(np.array([], dtype=np.float32))
+                reranked_I.append(np.array([], dtype=np.int64))
+                continue
+            feature_scores = np.atleast_1d(
+                cosine_similarity(self.memory_embeddings[valid_idx], self.explicit_feature_embedding[None, :]).squeeze()
+            )
+            mixed_scores = (1 - self.explicit_rerank_alpha) * valid_scores + self.explicit_rerank_alpha * feature_scores
             order = np.argsort(mixed_scores)[::-1][:top_k]
             reranked_D.append(mixed_scores[order].astype(np.float32))
             reranked_I.append(valid_idx[order].astype(np.int64))
@@ -321,6 +411,8 @@ class RAGRetriever:
         self.session_datetimes = []
         utility_map = test_item.get("session_utilities", {})
         utilities = []
+        self.history_plain_texts = []
+        self.history_turns_per_session = []
 
         for cur_sess_id, sess_entry, ts in zip(
             test_item["haystack_session_ids"],
@@ -336,6 +428,8 @@ class RAGRetriever:
             plain_text = json.dumps(tmp_data, separators=(",", ":"))
             corpus.append(plain_text)
             corpus_ids.append(segment_id)
+            self.history_plain_texts.append(" ".join(user_data))
+            self.history_turns_per_session.append(user_data)
             self.session_datetimes.append(safe_parse_datetime(ts))
 
             util = utility_map.get(cur_sess_id) if isinstance(utility_map, dict) else None
@@ -371,6 +465,48 @@ class RAGRetriever:
             user_history_embedding=base_profile_embedding,
             user_history_size=len(corpus),
         )
+        self.user_profile_embedding = l2_normalize(self.user_profile_embedding)
+
+        if self.enable_explicit_profile:
+            self.explicit_feature_profile = build_explicit_feature_profile(
+                self.history_turns_per_session,
+                top_k_keywords=self.explicit_feature_topk,
+            )
+            self.explicit_feature_text = render_explicit_feature_block(self.explicit_feature_profile)
+            if self.explicit_feature_text.strip():
+                if self.explicit_encoder_adapter is not None and self.explicit_encoder_adapter.available:
+                    self.explicit_feature_embedding = self.explicit_encoder_adapter.encode_texts(
+                        [self.explicit_feature_text],
+                        retriever_model=self.retriever_model,
+                    )[0]
+                else:
+                    self.explicit_feature_embedding = l2_normalize(
+                        self.retriever_model.encode([self.explicit_feature_text], convert_to_numpy=True)[0]
+                    )
+                self.user_profile_embedding = l2_normalize(
+                    (1 - self.explicit_profile_mix) * self.user_profile_embedding
+                    + self.explicit_profile_mix * self.explicit_feature_embedding
+                )
+            else:
+                self.explicit_feature_embedding = None
+
+            self.contrastive_examples = select_contrastive_examples(
+                test_item=test_item,
+                history_plain_texts=self.history_plain_texts,
+                history_ids=corpus_ids,
+                history_embeddings=embeddings,
+                anchor_embedding=self.user_profile_embedding,
+                top_k=self.contrastive_examples_k,
+                max_words=self.contrastive_max_words,
+                external_only=self.contrastive_external_only,
+            )
+            self.contrastive_block = render_contrastive_block(self.contrastive_examples)
+        else:
+            self.explicit_feature_profile = {}
+            self.explicit_feature_text = ""
+            self.explicit_feature_embedding = None
+            self.contrastive_examples = []
+            self.contrastive_block = ""
 
         self.memory_embeddings = embeddings
         t2 = time.perf_counter()
@@ -483,6 +619,7 @@ class RAGRetriever:
         d_scores, i_rankings = self.index.search(q_embeddings, candidate_k)
         d_scores, i_rankings = self._temporal_rerank(d_scores, i_rankings, top_k)
         d_scores, i_rankings = self._profile_rerank(d_scores, i_rankings, top_k)
+        d_scores, i_rankings = self._explicit_rerank(d_scores, i_rankings, top_k)
 
         rankings_id = self.segment_ids[i_rankings].tolist()[0]
         retrieved_chunks = np.array(self.chunks)[i_rankings].tolist()[0]
@@ -495,22 +632,22 @@ class RAGRetriever:
         q_embeddings = self.retriever_model.encode(question, convert_to_numpy=True)[0, :]
         g_embeddings = self.graph_center
         u_embeddings = self.user_profile_embedding
+        explicit_embeddings = self.explicit_feature_embedding
 
         reason_embd = self.retriever_model.encode([reason], convert_to_numpy=True)[0]
         fake = fake if isinstance(fake, list) else [str(fake)]
         prf_embd = self.retriever_model.encode(fake, convert_to_numpy=True)
         combined_vec = prf_embd.mean(0)
 
-        if self.enable_temporal_profile or self.enable_cold_start_router:
-            gate_logits = np.array(
-                [
-                    cosine_similarity(q_embeddings[None, :], combined_vec[None, :]).squeeze(),
-                    cosine_similarity(q_embeddings[None, :], reason_embd[None, :]).squeeze(),
-                    cosine_similarity(q_embeddings[None, :], u_embeddings[None, :]).squeeze(),
-                ]
-            )
+        if self.enable_temporal_profile or self.enable_cold_start_router or (self.enable_explicit_profile and explicit_embeddings is not None):
+            gate_vecs = [combined_vec, reason_embd, u_embeddings]
+            if explicit_embeddings is not None:
+                gate_vecs.append(explicit_embeddings)
+            gate_logits = np.array([cosine_similarity(q_embeddings[None, :], vec[None, :]).squeeze() for vec in gate_vecs])
             gate = softmax(gate_logits)
             q_embeddings = q_embeddings + g_embeddings + gate[0] * combined_vec + gate[1] * reason_embd + gate[2] * u_embeddings
+            if explicit_embeddings is not None and len(gate) > 3:
+                q_embeddings = q_embeddings + gate[3] * explicit_embeddings
         else:
             w1 = 1 + cosine_similarity((q_embeddings[None, :] + g_embeddings[None, :]) / 2, combined_vec[None, :]).squeeze()
             w2 = 1 + cosine_similarity((q_embeddings[None, :] + g_embeddings[None, :]) / 2, reason_embd[None, :]).squeeze()
@@ -520,6 +657,7 @@ class RAGRetriever:
         d_scores, i_rankings = self.index.search(q_embeddings[None, :], candidate_k)
         d_scores, i_rankings = self._temporal_rerank(d_scores, i_rankings, top_k)
         d_scores, i_rankings = self._profile_rerank(d_scores, i_rankings, top_k)
+        d_scores, i_rankings = self._explicit_rerank(d_scores, i_rankings, top_k)
 
         rankings_id = self.segment_ids[i_rankings].tolist()[0]
         retrieved_chunks = np.array(self.chunks)[i_rankings].tolist()[0]
@@ -585,6 +723,62 @@ if __name__ == "__main__":
     )
     parser.add_argument("--cold_start_debug", action="store_true", help="Enable debug metadata in cold-start routing.")
 
+    parser.add_argument("--explicit_profile", action="store_true", help="Enable explicit user-feature modeling.")
+    parser.add_argument(
+        "--explicit_profile_mix",
+        type=float,
+        default=0.25,
+        help="Mix ratio between routed profile embedding and explicit feature embedding.",
+    )
+    parser.add_argument(
+        "--explicit_feature_topk",
+        type=int,
+        default=12,
+        help="Top-k keywords used to build explicit user feature profile.",
+    )
+    parser.add_argument(
+        "--explicit_seed_feature_alpha",
+        type=float,
+        default=0.15,
+        help="Feature-similarity boost weight in seed retrieval.",
+    )
+    parser.add_argument(
+        "--explicit_rerank_alpha",
+        type=float,
+        default=0.2,
+        help="Feature-aware rerank blend ratio in final retrieval.",
+    )
+    parser.add_argument(
+        "--contrastive_examples_k",
+        type=int,
+        default=2,
+        help="Number of contrastive examples injected into prompt.",
+    )
+    parser.add_argument(
+        "--contrastive_max_words",
+        type=int,
+        default=90,
+        help="Max words for each contrastive example snippet.",
+    )
+    parser.add_argument(
+        "--contrastive_external_only",
+        action="store_true",
+        help="Use only external contrastive examples from test_item, no history fallback.",
+    )
+    parser.add_argument(
+        "--explicit_encoder_ckpt",
+        type=str,
+        default="",
+        help="Optional checkpoint path for trained explicit-user projector.",
+    )
+    parser.add_argument(
+        "--explicit_encoder_device",
+        type=str,
+        default="cpu",
+        help="Device for explicit-user projector loading (e.g., cpu, cuda:0).",
+    )
+    parser.add_argument("--explicit_debug", action="store_true", help="Dump explicit-profile debug fields to output json.")
+
     parser.add_argument("--k_seed", type=int, default=10, help="K_seed for P-PRF++ seed history sampling.")
     parser.add_argument("--top_k_retrieval", type=int, default=10, help="Top-K used for final retrieval evaluation.")
     parser.add_argument("--save_suffix", type=str, default="", help="Optional suffix for output json file.")
@@ -609,6 +803,29 @@ if __name__ == "__main__":
     print("temporal_profile:", enable_temporal_profile)
 
     method_lc = method.lower()
+
+    enable_explicit_profile = args.explicit_profile or method_lc in {
+        "pbr_explicit",
+        "pbr_feature",
+        "pbr_feature_ce",
+        "pbr++_explicit",
+    }
+    explicit_cfg = {
+        "enable_explicit_profile": enable_explicit_profile,
+        "explicit_profile_mix": args.explicit_profile_mix,
+        "explicit_feature_topk": args.explicit_feature_topk,
+        "explicit_seed_feature_alpha": args.explicit_seed_feature_alpha,
+        "explicit_rerank_alpha": args.explicit_rerank_alpha,
+        "contrastive_examples_k": args.contrastive_examples_k,
+        "contrastive_max_words": args.contrastive_max_words,
+        "contrastive_external_only": args.contrastive_external_only,
+        "explicit_encoder_ckpt": args.explicit_encoder_ckpt,
+        "explicit_encoder_device": args.explicit_encoder_device,
+        "explicit_debug": args.explicit_debug,
+    }
+    explicit_cfg_for_log = dict(explicit_cfg)
+    print("explicit_profile:", enable_explicit_profile)
+
     enable_cold_start_router = args.cold_start_router or method_lc in {
         "pbr_cold",
         "pbr_coldstart",
@@ -649,6 +866,8 @@ if __name__ == "__main__":
         tag_parts.append("temporal")
     if enable_cold_start_router:
         tag_parts.append("coldstart")
+    if enable_explicit_profile:
+        tag_parts.append("explicit")
     model_tag = "_".join(tag_parts)
     save_path = in_file.replace(".json", f"_{model_tag}{args.save_suffix}.json")
     print(save_path)
@@ -669,15 +888,22 @@ if __name__ == "__main__":
             data_type,
             temporal_cfg=temporal_cfg,
             coldstart_cfg=coldstart_cfg,
+            explicit_cfg=explicit_cfg,
         )
         retriever.build_index(test_item)
         questions = [question]
-        if enable_temporal_profile or enable_cold_start_router:
+        if enable_temporal_profile or enable_cold_start_router or enable_explicit_profile:
             d_scores, i_rankings, retrieved_chunks, rankings_id = retriever.query_seed_weighted(questions, top_k=args.k_seed)
         else:
             d_scores, i_rankings, retrieved_chunks, rankings_id = retriever.query(questions, top_k=args.k_seed)
         docs = "\n".join(retrieved_chunks[: args.k_seed])
-        p_uttr_prompt, p_rea_prompt = gen_retrieval_prompt_fake_ada_reason_10(question, docs, "")
+        p_uttr_prompt, p_rea_prompt = gen_retrieval_prompt_fake_ada_reason_10(
+            question,
+            docs,
+            "",
+            explicit_feature_block=retriever.explicit_feature_text,
+            contrastive_block=retriever.contrastive_block,
+        )
         uttr_prompt.append(p_uttr_prompt)
         rea_prompt.append(p_rea_prompt)
 
@@ -694,6 +920,7 @@ if __name__ == "__main__":
             data_type,
             temporal_cfg=temporal_cfg,
             coldstart_cfg=coldstart_cfg,
+            explicit_cfg=explicit_cfg,
         )
         retriever.build_index(test_item)
         questions = [question]
@@ -741,6 +968,12 @@ if __name__ == "__main__":
         if enable_cold_start_router:
             cur_results["cold_start_cfg"] = coldstart_cfg_for_log
             cur_results["cold_start_route_info"] = retriever.cold_start_route_info
+        if enable_explicit_profile:
+            cur_results["explicit_profile_cfg"] = explicit_cfg_for_log
+            if args.explicit_debug:
+                cur_results["explicit_encoder_meta"] = retriever.explicit_encoder_meta
+                cur_results["explicit_feature_profile"] = retriever.explicit_feature_profile
+                cur_results["contrastive_examples"] = retriever.contrastive_examples
 
         correct_docs = list(set([doc_id for doc_id in corpus_ids if "answer" in doc_id]))
         for k in [1, 3, 5, 10]:

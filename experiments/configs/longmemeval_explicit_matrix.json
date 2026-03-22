@@ -1,0 +1,101 @@
+{
+  "global": {
+    "data_type": "s",
+    "retrieval_model_name": "multi-qa-MiniLM-L6-cos-v1",
+    "k_seed": 10,
+    "top_k_retrieval": 10,
+    "seed_candidate_multiplier": 4,
+    "cold_start_prototype_bank": "./data/longmemeval_data/prototype_bank_longmemeval_s.json"
+  },
+  "experiments": [
+    {
+      "name": "pbr_base",
+      "model_type": "PBR",
+      "temporal_profile": false,
+      "cold_start_router": false,
+      "explicit_profile": false,
+      "save_suffix": "_exp_pbr_base",
+      "args": {}
+    },
+    {
+      "name": "pbr_explicit_features",
+      "model_type": "PBR",
+      "temporal_profile": false,
+      "cold_start_router": false,
+      "explicit_profile": true,
+      "save_suffix": "_exp_explicit",
+      "args": {
+        "explicit_profile_mix": 0.25,
+        "explicit_feature_topk": 12,
+        "explicit_seed_feature_alpha": 0.15,
+        "explicit_rerank_alpha": 0.2,
+        "contrastive_examples_k": 0
+      }
+    },
+    {
+      "name": "pbr_explicit_with_contrastive",
+      "model_type": "PBR",
+      "temporal_profile": false,
+      "cold_start_router": false,
+      "explicit_profile": true,
+      "save_suffix": "_exp_explicit_ce",
+      "args": {
+        "explicit_profile_mix": 0.25,
+        "explicit_feature_topk": 12,
+        "explicit_seed_feature_alpha": 0.15,
+        "explicit_rerank_alpha": 0.2,
+        "contrastive_examples_k": 2,
+        "contrastive_max_words": 90
+      }
+    },
+    {
+      "name": "pbr_temporal_explicit",
+      "model_type": "PBR++",
+      "temporal_profile": true,
+      "cold_start_router": false,
+      "explicit_profile": true,
+      "save_suffix": "_exp_temporal_explicit",
+      "args": {
+        "temporal_decay_lambda": 0.05,
+        "temporal_util_alpha": 4.0,
+        "temporal_util_bias": 0.0,
+        "temporal_rerank_beta": 0.4,
+        "temporal_graph_decay": 0.02,
+        "short_term_blend": 0.5,
+        "explicit_profile_mix": 0.25,
+        "explicit_feature_topk": 12,
+        "explicit_seed_feature_alpha": 0.15,
+        "explicit_rerank_alpha": 0.2,
+        "contrastive_examples_k": 2
+      }
+    },
+    {
+      "name": "pbr_temporal_cold_explicit",
+      "model_type": "PBR++",
+      "temporal_profile": true,
+      "cold_start_router": true,
+      "explicit_profile": true,
+      "save_suffix": "_exp_temporal_cold_explicit",
+      "args": {
+        "temporal_decay_lambda": 0.05,
+        "temporal_util_alpha": 4.0,
+        "temporal_util_bias": 0.0,
+        "temporal_rerank_beta": 0.4,
+        "temporal_graph_decay": 0.02,
+        "short_term_blend": 0.5,
+        "cold_start_m0": 3,
+        "cold_start_tau": 2.0,
+        "cold_start_supervised_weight": 0.6,
+        "cold_start_anchor_mix": 0.35,
+        "cold_start_seed_profile_alpha": 0.2,
+        "cold_start_rerank_alpha": 0.25,
+        "cold_start_label_keys": "department,role,team",
+        "explicit_profile_mix": 0.25,
+        "explicit_feature_topk": 12,
+        "explicit_seed_feature_alpha": 0.15,
+        "explicit_rerank_alpha": 0.2,
+        "contrastive_examples_k": 2
+      }
+    }
+  ]
+}

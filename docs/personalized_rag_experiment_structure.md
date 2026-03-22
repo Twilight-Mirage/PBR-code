@@ -8,6 +8,7 @@ This repo is now organized so each innovation can be switched on/off with CLI fl
   - Base PBR pipeline
   - Temporal extension (innovation-1)
   - Cold-start router extension (innovation-2)
+  - Explicit user-feature + contrastive extension (innovation-3)
 
 All comparison runs should use this single entrypoint to keep evaluation consistent.
 
@@ -21,7 +22,16 @@ All comparison runs should use this single entrypoint to keep evaluation consist
     - `blend` (`0 < m < m0`)
     - `individual` (`m >= m0`)
 
-Keep each new innovation in an isolated module and inject via config into `RAGRetriever`.
+- `src/retrieval/explicit_profile_utils.py`
+  - Explicit user feature extraction (style/keywords/phrases)
+  - Explicit feature prompt block generation
+  - Contrastive example selection (external negatives first, history fallback)
+
+- `src/retrieval/explicit_user_encoder.py`
+  - Trainable explicit-user projector adapter
+  - Checkpoint save/load for inference-time feature projection
+
+Keep each innovation in an isolated module and inject via config into `RAGRetriever`.
 
 ## 3) Reproducible Experiment Layer
 
@@ -31,12 +41,16 @@ Keep each new innovation in an isolated module and inject via config into `RAGRe
   - Temporal ablations.
 - `experiments/configs/longmemeval_coldstart_matrix.json`
   - Cold-start ablations (base/temporal/cold/hybrid).
+- `experiments/configs/longmemeval_explicit_matrix.json`
+  - Explicit-feature/contrastive ablations.
+- `experiments/configs/longmemeval_explicit_trained_matrix.json`
+  - Explicit-feature ablation with trained projector.
 - `experiments/summarize_retrieval_results.py`
   - Aggregates output JSON into markdown table.
 
 Use matrix files as the single source of truth for comparisons.
 
-## 4) Prototype Bank Build Step
+## 4) Data and Training Utilities
 
 - `experiments/build_coldstart_prototype_bank.py`
   - Builds `prototype_bank.json` from dataset history.
@@ -46,9 +60,19 @@ Use matrix files as the single source of truth for comparisons.
     - `user_to_cluster`
     - `global_mean`
 
-Recommended output path:
+- `experiments/build_explicit_contrastive_pairs.py`
+  - Builds contrastive triplets for training explicit user representations.
+  - Output format: `anchor_profile_text`, `positive_text`, `negative_text`.
+
+- `experiments/train_explicit_user_encoder.py`
+  - Trains explicit-user projector with contrastive objectives.
+  - Produces checkpoint consumed by `retrieval_PBR.py` via `--explicit_encoder_ckpt`.
+
+Recommended output paths:
 
 - `data/longmemeval_data/prototype_bank_longmemeval_s.json`
+- `data/longmemeval_data/explicit_contrastive_pairs_s.jsonl`
+- `data/longmemeval_data/explicit_user_encoder_s.pt`
 
 ## 5) Result Convention
 
@@ -57,7 +81,10 @@ Recommended output path:
 - `PBR`
 - `PBR_temporal`
 - `PBR_coldstart`
+- `PBR_explicit`
 - `PBR_temporal_coldstart`
+- `PBR_temporal_explicit`
+- `PBR_temporal_coldstart_explicit`
 
 Plus your matrix `save_suffix`.
 

@@ -34,6 +34,8 @@ def build_command(python_bin, repo_root, global_cfg, exp_cfg):
         cmd.append("--temporal_profile")
     if bool(exp_cfg.get("cold_start_router", False)):
         cmd.append("--cold_start_router")
+    if bool(exp_cfg.get("explicit_profile", False)):
+        cmd.append("--explicit_profile")
 
     save_suffix = exp_cfg.get("save_suffix")
     if not save_suffix:
