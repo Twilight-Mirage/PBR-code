@@ -1,4 +1,4 @@
-﻿import argparse
+import argparse
 import json
 import subprocess
 import sys
@@ -32,6 +32,8 @@ def build_command(python_bin, repo_root, global_cfg, exp_cfg):
 
     if bool(exp_cfg.get("temporal_profile", False)):
         cmd.append("--temporal_profile")
+    if bool(exp_cfg.get("cold_start_router", False)):
+        cmd.append("--cold_start_router")
 
     save_suffix = exp_cfg.get("save_suffix")
     if not save_suffix:
@@ -74,4 +76,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

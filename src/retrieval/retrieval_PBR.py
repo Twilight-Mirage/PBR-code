@@ -1,4 +1,4 @@
-﻿import argparse
+import argparse
 import asyncio
 import json
 import time
@@ -14,6 +14,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 from tqdm import tqdm
 
 from async_llm import run_async
+from src.retrieval.cold_start_router import ColdStartRouter, l2_normalize, load_prototype_bank
 from src.retrieval.eval_utils import evaluate_retrieval
 
 
@@ -137,7 +138,7 @@ def safe_parse_datetime(value):
 
 
 class RAGRetriever:
-    def __init__(self, retriever_model, retriever_model_name, data_type="s", temporal_cfg=None):
+    def __init__(self, retriever_model, retriever_model_name, data_type="s", temporal_cfg=None, coldstart_cfg=None):
         self.retriever_model = retriever_model
         self.index = None
         self.chunks = []
@@ -175,6 +176,17 @@ class RAGRetriever:
         self.user_profile_embedding = None
         self.short_term_center = None
         self.long_term_center = None
+
+        coldstart_cfg = coldstart_cfg or {}
+        self.cold_router = ColdStartRouter(coldstart_cfg)
+        self.enable_cold_start_router = bool(coldstart_cfg.get("enable_cold_start_router", False))
+        self.cold_start_anchor_mix = float(coldstart_cfg.get("cold_start_anchor_mix", 0.35))
+        self.cold_start_seed_profile_alpha = float(coldstart_cfg.get("cold_start_seed_profile_alpha", 0.2))
+        self.cold_start_rerank_alpha = float(coldstart_cfg.get("cold_start_rerank_alpha", 0.25))
+        self.cold_start_route_info = {
+            "mode": "individual",
+            "reason": "router_not_used",
+        }
 
     def _estimate_session_utility(self, sess_entry):
         user_turns = [x.get("content", "") for x in sess_entry if x.get("role") == "user"]
@@ -242,6 +254,11 @@ class RAGRetriever:
         else:
             weighted_scores = sim_scores
 
+        if self.enable_cold_start_router and self.user_profile_embedding is not None:
+            profile_sim = cosine_similarity(self.memory_embeddings, self.user_profile_embedding[None, :]).squeeze()
+            if self.cold_start_route_info.get("mode") in {"cohort_only", "blend"}:
+                weighted_scores = weighted_scores * (1 + self.cold_start_seed_profile_alpha * profile_sim)
+
         idx = np.argsort(weighted_scores)[::-1][:top_k]
         d_scores = weighted_scores[idx][None, :].astype(np.float32)
         i_rankings = idx[None, :].astype(np.int64)
@@ -276,6 +293,29 @@ class RAGRetriever:
 
         return np.stack(reranked_D), np.stack(reranked_I)
 
+    def _profile_rerank(self, D, I, top_k):
+        if (not self.enable_cold_start_router) or (self.user_profile_embedding is None):
+            return D[:, :top_k], I[:, :top_k]
+        if self.cold_start_route_info.get("mode") not in {"cohort_only", "blend"}:
+            return D[:, :top_k], I[:, :top_k]
+
+        reranked_D = []
+        reranked_I = []
+        for row in range(I.shape[0]):
+            valid_mask = I[row] >= 0
+            valid_idx = I[row][valid_mask]
+            valid_scores = D[row][valid_mask]
+            if len(valid_idx) == 0:
+                reranked_D.append(np.array([], dtype=np.float32))
+                reranked_I.append(np.array([], dtype=np.int64))
+                continue
+            profile_scores = cosine_similarity(self.memory_embeddings[valid_idx], self.user_profile_embedding[None, :]).squeeze()
+            mixed_scores = (1 - self.cold_start_rerank_alpha) * valid_scores + self.cold_start_rerank_alpha * profile_scores
+            order = np.argsort(mixed_scores)[::-1][:top_k]
+            reranked_D.append(mixed_scores[order].astype(np.float32))
+            reranked_I.append(valid_idx[order].astype(np.int64))
+        return np.stack(reranked_D), np.stack(reranked_I)
+
     def build_index(self, test_item):
         corpus, corpus_ids = [], []
         self.session_datetimes = []
@@ -303,6 +343,9 @@ class RAGRetriever:
                 util = self._estimate_session_utility(sess_entry)
             utilities.append(float(util))
 
+        if len(corpus) == 0:
+            raise ValueError("No user history found in haystack_sessions; cannot build retrieval index.")
+
         embeddings = self.retriever_model.encode(corpus, convert_to_numpy=True)
         self.user_embd_mean = np.mean(embeddings, axis=0)
 
@@ -317,15 +360,29 @@ class RAGRetriever:
 
         if self.enable_temporal_profile:
             weighted_profile = self.temporal_weights / (self.temporal_weights.sum() + 1e-8)
-            self.user_profile_embedding = np.dot(weighted_profile, embeddings)
+            base_profile_embedding = np.dot(weighted_profile, embeddings)
         else:
-            self.user_profile_embedding = np.mean(embeddings, axis=0)
+            base_profile_embedding = np.mean(embeddings, axis=0)
+
+        query_embedding = self.retriever_model.encode([test_item.get("question", "")], convert_to_numpy=True)[0]
+        self.user_profile_embedding, self.cold_start_route_info = self.cold_router.route(
+            test_item=test_item,
+            query_embedding=query_embedding,
+            user_history_embedding=base_profile_embedding,
+            user_history_size=len(corpus),
+        )
 
         self.memory_embeddings = embeddings
         t2 = time.perf_counter()
         self._build_memory_graph(embeddings)
         t3 = time.perf_counter()
         print(f"[TIME] memory graph building stage took {t3 - t2:.4f} seconds")
+
+        if self.enable_cold_start_router and self.cold_start_route_info.get("mode") in {"cohort_only", "blend"}:
+            self.graph_center = l2_normalize(
+                (1 - self.cold_start_anchor_mix) * self.graph_center
+                + self.cold_start_anchor_mix * self.user_profile_embedding
+            )
 
     def _build_memory_graph(self, embeddings):
         n = len(embeddings)
@@ -425,6 +482,7 @@ class RAGRetriever:
         candidate_k = min(len(self.chunks), max(top_k, top_k * self.seed_candidate_multiplier))
         d_scores, i_rankings = self.index.search(q_embeddings, candidate_k)
         d_scores, i_rankings = self._temporal_rerank(d_scores, i_rankings, top_k)
+        d_scores, i_rankings = self._profile_rerank(d_scores, i_rankings, top_k)
 
         rankings_id = self.segment_ids[i_rankings].tolist()[0]
         retrieved_chunks = np.array(self.chunks)[i_rankings].tolist()[0]
@@ -443,7 +501,7 @@ class RAGRetriever:
         prf_embd = self.retriever_model.encode(fake, convert_to_numpy=True)
         combined_vec = prf_embd.mean(0)
 
-        if self.enable_temporal_profile:
+        if self.enable_temporal_profile or self.enable_cold_start_router:
             gate_logits = np.array(
                 [
                     cosine_similarity(q_embeddings[None, :], combined_vec[None, :]).squeeze(),
@@ -461,6 +519,7 @@ class RAGRetriever:
         candidate_k = min(len(self.chunks), max(top_k, top_k * self.seed_candidate_multiplier))
         d_scores, i_rankings = self.index.search(q_embeddings[None, :], candidate_k)
         d_scores, i_rankings = self._temporal_rerank(d_scores, i_rankings, top_k)
+        d_scores, i_rankings = self._profile_rerank(d_scores, i_rankings, top_k)
 
         rankings_id = self.segment_ids[i_rankings].tolist()[0]
         retrieved_chunks = np.array(self.chunks)[i_rankings].tolist()[0]
@@ -481,6 +540,51 @@ if __name__ == "__main__":
     parser.add_argument("--temporal_graph_decay", type=float, default=0.02, help="Temporal proximity decay in graph edges.")
     parser.add_argument("--short_term_blend", type=float, default=0.5, help="Blend ratio of short-term and long-term anchor.")
     parser.add_argument("--seed_candidate_multiplier", type=int, default=4, help="Over-fetch multiplier before temporal rerank.")
+
+    parser.add_argument("--cold_start_router", action="store_true", help="Enable cohort prototype router for cold-start users.")
+    parser.add_argument("--cold_start_prototype_bank", type=str, default="", help="Path to prototype-bank json.")
+    parser.add_argument("--cold_start_m0", type=int, default=3, help="History-size threshold for switching to individual profile.")
+    parser.add_argument("--cold_start_tau", type=float, default=2.0, help="Blend scheduler tau in beta=1-exp(-m/tau).")
+    parser.add_argument(
+        "--cold_start_supervised_weight",
+        type=float,
+        default=0.6,
+        help="Weight for supervised prototype in supervised/unsupervised hybrid.",
+    )
+    parser.add_argument(
+        "--cold_start_prefer_supervised",
+        dest="cold_start_prefer_supervised",
+        action="store_true",
+        default=True,
+        help="Prefer supervised labels when both supervised and unsupervised prototypes exist.",
+    )
+    parser.add_argument(
+        "--cold_start_prefer_unsupervised",
+        dest="cold_start_prefer_supervised",
+        action="store_false",
+        help="Prefer unsupervised centroid when both supervised and unsupervised prototypes exist.",
+    )
+    parser.add_argument(
+        "--cold_start_label_keys",
+        type=str,
+        default="department,role,team",
+        help="Comma-separated label keys used for supervised prototype lookup.",
+    )
+    parser.add_argument("--cold_start_anchor_mix", type=float, default=0.35, help="Mix weight of routed profile into graph center.")
+    parser.add_argument(
+        "--cold_start_seed_profile_alpha",
+        type=float,
+        default=0.2,
+        help="Profile similarity boost in seed retrieval for cohort-only/blend mode.",
+    )
+    parser.add_argument(
+        "--cold_start_rerank_alpha",
+        type=float,
+        default=0.25,
+        help="Profile rerank blend ratio in final retrieval for cohort-only/blend mode.",
+    )
+    parser.add_argument("--cold_start_debug", action="store_true", help="Enable debug metadata in cold-start routing.")
+
     parser.add_argument("--k_seed", type=int, default=10, help="K_seed for P-PRF++ seed history sampling.")
     parser.add_argument("--top_k_retrieval", type=int, default=10, help="Top-K used for final retrieval evaluation.")
     parser.add_argument("--save_suffix", type=str, default="", help="Optional suffix for output json file.")
@@ -504,11 +608,48 @@ if __name__ == "__main__":
     }
     print("temporal_profile:", enable_temporal_profile)
 
+    method_lc = method.lower()
+    enable_cold_start_router = args.cold_start_router or method_lc in {
+        "pbr_cold",
+        "pbr_coldstart",
+        "pbr-coldstart",
+        "pbr++_cold",
+        "pbr++_coldstart",
+    }
+    cold_start_label_keys = [x.strip() for x in args.cold_start_label_keys.split(",") if x.strip()]
+    if enable_cold_start_router and not args.cold_start_prototype_bank.strip():
+        raise ValueError("cold-start router is enabled, but --cold_start_prototype_bank is empty.")
+    if enable_cold_start_router:
+        prototype_bank_obj = load_prototype_bank(args.cold_start_prototype_bank)
+    else:
+        prototype_bank_obj = None
+    coldstart_cfg = {
+        "enable_cold_start_router": enable_cold_start_router,
+        "cold_start_m0": args.cold_start_m0,
+        "cold_start_tau": args.cold_start_tau,
+        "cold_start_supervised_weight": args.cold_start_supervised_weight,
+        "cold_start_prefer_supervised": args.cold_start_prefer_supervised,
+        "cold_start_label_keys": cold_start_label_keys,
+        "cold_start_anchor_mix": args.cold_start_anchor_mix,
+        "cold_start_seed_profile_alpha": args.cold_start_seed_profile_alpha,
+        "cold_start_rerank_alpha": args.cold_start_rerank_alpha,
+        "cold_start_debug": args.cold_start_debug,
+        "cold_start_prototype_bank": args.cold_start_prototype_bank,
+        "cold_start_prototype_bank_obj": prototype_bank_obj,
+    }
+    coldstart_cfg_for_log = {k: v for k, v in coldstart_cfg.items() if k != "cold_start_prototype_bank_obj"}
+    print("cold_start_router:", enable_cold_start_router)
+
     data_type = args.data_type
     in_file = f"./data/longmemeval_data/longmemeval_{data_type}.json"
     print(in_file)
 
-    model_tag = "PBR_temporal" if enable_temporal_profile else "PBR"
+    tag_parts = ["PBR"]
+    if enable_temporal_profile:
+        tag_parts.append("temporal")
+    if enable_cold_start_router:
+        tag_parts.append("coldstart")
+    model_tag = "_".join(tag_parts)
     save_path = in_file.replace(".json", f"_{model_tag}{args.save_suffix}.json")
     print(save_path)
 
@@ -522,10 +663,16 @@ if __name__ == "__main__":
 
     for test_item in tqdm(in_data):
         question = test_item["question"]
-        retriever = RAGRetriever(retriever_model, retriever_model_name, data_type, temporal_cfg=temporal_cfg)
+        retriever = RAGRetriever(
+            retriever_model,
+            retriever_model_name,
+            data_type,
+            temporal_cfg=temporal_cfg,
+            coldstart_cfg=coldstart_cfg,
+        )
         retriever.build_index(test_item)
         questions = [question]
-        if enable_temporal_profile:
+        if enable_temporal_profile or enable_cold_start_router:
             d_scores, i_rankings, retrieved_chunks, rankings_id = retriever.query_seed_weighted(questions, top_k=args.k_seed)
         else:
             d_scores, i_rankings, retrieved_chunks, rankings_id = retriever.query(questions, top_k=args.k_seed)
@@ -541,7 +688,13 @@ if __name__ == "__main__":
 
     for idx, test_item in tqdm(enumerate(in_data)):
         question = test_item["question"]
-        retriever = RAGRetriever(retriever_model, retriever_model_name, data_type, temporal_cfg=temporal_cfg)
+        retriever = RAGRetriever(
+            retriever_model,
+            retriever_model_name,
+            data_type,
+            temporal_cfg=temporal_cfg,
+            coldstart_cfg=coldstart_cfg,
+        )
         retriever.build_index(test_item)
         questions = [question]
         try:
@@ -585,6 +738,9 @@ if __name__ == "__main__":
         }
         if enable_temporal_profile:
             cur_results["temporal_profile_cfg"] = temporal_cfg
+        if enable_cold_start_router:
+            cur_results["cold_start_cfg"] = coldstart_cfg_for_log
+            cur_results["cold_start_route_info"] = retriever.cold_start_route_info
 
         correct_docs = list(set([doc_id for doc_id in corpus_ids if "answer" in doc_id]))
         for k in [1, 3, 5, 10]:
