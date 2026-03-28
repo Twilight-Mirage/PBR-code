@@ -1,3 +1,4 @@
 *.jsonl
 *.json
 *.jsonl.gz
+!experiments/configs/*.sample.json

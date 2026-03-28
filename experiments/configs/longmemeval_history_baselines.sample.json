@@ -1,0 +1,37 @@
+﻿{
+  "global": {
+    "run_root": "./experiments/runs/baselines_history",
+    "input_json": "./data/longmemeval_data/longmemeval_s_cleaned.json",
+
+    "gen_model_name": "qwen3.5-flash",
+    "gen_model_alias": "qwen3.5-flash",
+    "openai_key_env": "DASHSCOPE_API_KEY",
+    "openai_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+
+    "topk_context": 10,
+    "history_format": "json",
+    "useronly": "false",
+    "cot": "false",
+    "con": "false",
+    "merge_key_expansion_into_value": "none",
+
+    "run_eval": true,
+    "eval_model": "gpt-4o-mini"
+  },
+  "experiments": [
+    {
+      "name": "history_only",
+      "method": "history_rag",
+      "args": {
+        "retriever_type": "orig-session"
+      }
+    },
+    {
+      "name": "naive_rag",
+      "method": "naive_rag",
+      "args": {
+        "outfile_prefix": "naive_rag"
+      }
+    }
+  ]
+}

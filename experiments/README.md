@@ -95,7 +95,8 @@ Sample matrices:
 
 - `experiments/configs/baseline_unified_matrix.sample.json`
 - `experiments/configs/longmemeval_llmgt_baseline.sample.json` (retrieved vs oracle evidence only)
-
+- `experiments/configs/chapter4_baselines_partial_lamp.sample.json` (Chapter-4 baseline suite; LaMP-4/LaMP-7 only in partial baseline tracks)
+- `experiments/configs/chapter4_dua_main_partial_lamp.sample.json` (DUA main runs; LongMemEval full, PersonaBench partial)
 Dry-run (recommended first):
 
 ```bash
@@ -166,3 +167,26 @@ The checker reports:
 - Keep matrix files as the single source of truth for reproducible comparisons.
 
 
+
+## Chapter 4 Alignment (Partial LaMP)
+
+To align with thesis Chapter 4 while keeping current code-path constraints:
+
+- **LongMemEval**: full pipeline (`retrieval + generation + eval`) is supported.
+- **PersonaBench**: partial participation in unified local pipeline (usually generation-focused, eval optional).
+- **LaMP-4 / LaMP-7**: participate only in **partial baseline tracks** (for example AF+CE official), not in oracle-evidence or LongMemEval-style retrieval ablations.
+
+Recommended commands:
+
+```bash
+<python_bin> experiments/run_baseline_matrix.py \
+  --matrix experiments/configs/chapter4_baselines_partial_lamp.sample.json \
+  --dry_run
+
+<python_bin> experiments/run_dua_e2e_matrix.py \
+  --matrix experiments/configs/chapter4_dua_main_partial_lamp.sample.json \
+  --dry_run
+```
+
+`run_dua_e2e_matrix.py` now supports experiment-level `args.in_file` and `args.ref_json`,
+so each experiment can target different datasets within one matrix.

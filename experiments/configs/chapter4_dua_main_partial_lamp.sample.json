@@ -1,0 +1,83 @@
+{
+  "global": {
+    "run_root": "./experiments/runs/chapter4/dua_main",
+    "data_type": "s",
+    "k_seed": 10,
+    "top_k_retrieval": 10,
+    "retrieval_model_name": "multi-qa-MiniLM-L6-cos-v1",
+    "gen_model_name": "qwen3.5-flash",
+    "gen_model_alias": "qwen35-flash",
+    "openai_key_env": "OPENAI_API_KEY",
+    "openai_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "llm_api_key_env": "OPENAI_API_KEY",
+    "llm_model": "qwen3.5-flash",
+    "history_format": "json",
+    "retriever_type": "flat-session",
+    "topk_context": 10,
+    "useronly": "false",
+    "cot": "false",
+    "con": "false",
+    "merge_key_expansion_into_value": "none",
+    "run_eval": false,
+    "eval_model": "gpt-4o-mini"
+  },
+  "experiments": [
+    {
+      "name": "dua_longmemeval_full",
+      "model_type": "PBR++",
+      "temporal_profile": true,
+      "cold_start_router": true,
+      "explicit_profile": true,
+      "save_suffix": "_exp_dua_longmemeval",
+      "args": {
+        "in_file": "./data/longmemeval_data/longmemeval_s_cleaned.json",
+        "ref_json": "./data/longmemeval_data/longmemeval_s_cleaned.json",
+        "run_eval": true,
+        "temporal_decay_lambda": 0.05,
+        "temporal_util_alpha": 4.0,
+        "temporal_util_bias": 0.0,
+        "temporal_rerank_beta": 0.4,
+        "temporal_graph_decay": 0.02,
+        "short_term_blend": 0.5,
+        "cold_start_prototype_bank": "./data/longmemeval_data/prototype_bank_longmemeval_s_cleaned.json",
+        "cold_start_gate": "exp",
+        "cold_start_tau": 2.0,
+        "cold_start_m0": 3,
+        "cold_start_supervised_weight": 0.6,
+        "cold_start_anchor_mix": 0.35,
+        "cold_start_seed_profile_alpha": 0.2,
+        "cold_start_rerank_alpha": 0.25,
+        "cold_start_label_keys": "department,role,team",
+        "explicit_profile_mix": 0.25,
+        "explicit_feature_topk": 12,
+        "contrastive_examples_k": 2,
+        "contrastive_max_words": 90,
+        "enable_short_term_state": true,
+        "short_term_window": 3,
+        "short_term_query_mix": 0.4,
+        "user_state_seed_alpha": 0.15,
+        "user_state_rerank_alpha": 0.25,
+        "contrastive_online_alpha": 0.1
+      }
+    },
+    {
+      "name": "dua_personabench_partial",
+      "model_type": "PBR",
+      "temporal_profile": false,
+      "cold_start_router": false,
+      "explicit_profile": true,
+      "save_suffix": "_exp_dua_personabench_partial",
+      "args": {
+        "in_file": "./data/personabench_data/personabench_eval.json",
+        "ref_json": "./data/personabench_data/personabench_eval.json",
+        "run_eval": false,
+        "enable_short_term_state": true,
+        "short_term_window": 2,
+        "short_term_query_mix": 0.4,
+        "user_state_seed_alpha": 0.15,
+        "user_state_rerank_alpha": 0.25,
+        "contrastive_online_alpha": 0.1
+      }
+    }
+  ]
+}

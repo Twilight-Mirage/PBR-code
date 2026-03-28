@@ -117,15 +117,22 @@ def check_dua_e2e_matrix(matrix_path: Path, repo_root: Path, report: ReadinessRe
     global_cfg = matrix.get("global", {})
     exps = matrix.get("experiments", [])
 
-    in_path = _check_in_file(global_cfg, repo_root, report)
+    default_in_path = _check_in_file(global_cfg, repo_root, report)
 
     run_eval_global = bool(global_cfg.get("run_eval", False))
-    ref_json = _resolve_path(global_cfg.get("ref_json", str(in_path)), repo_root)
-    if run_eval_global and not ref_json.exists():
-        report.blocker(f"run_eval=true but ref_json not found: {ref_json}")
+    default_ref_json = _resolve_path(global_cfg.get("ref_json", str(default_in_path)), repo_root)
+    if run_eval_global and not default_ref_json.exists():
+        report.blocker(f"run_eval=true but ref_json not found: {default_ref_json}")
 
     for exp in exps:
         args = exp.get("args", {})
+        exp_name = exp.get("name", "<exp>")
+
+        in_file = args.get("in_file", str(default_in_path))
+        cur_in_path = _resolve_path(str(in_file), repo_root)
+        if not cur_in_path.exists():
+            report.blocker(f"{exp_name}: input file not found: {cur_in_path}")
+
         if bool(exp.get("cold_start_router", False)):
             _check_prototype_bank(global_cfg, exp, repo_root, report)
         if bool(exp.get("explicit_profile", False)):
@@ -133,17 +140,18 @@ def check_dua_e2e_matrix(matrix_path: Path, repo_root: Path, report: ReadinessRe
 
         llm_key, llm_env = _resolve_key(args, global_cfg, "llm_api_key", "llm_api_key_env", "OPENAI_API_KEY")
         if not llm_key:
-            report.blocker(f"{exp.get('name', '<exp>')}: missing retrieval LLM key (set args.llm_api_key, env {llm_env}, or project_settings.py).")
+            report.blocker(f"{exp_name}: missing retrieval LLM key (set args.llm_api_key, env {llm_env}, or project_settings.py).")
 
         openai_key, openai_env = _resolve_key(args, global_cfg, "openai_key", "openai_key_env", "OPENAI_API_KEY")
         if not openai_key:
             report.warn(
-                f"{exp.get('name', '<exp>')}: generation openai_key unresolved (env {openai_env} or project_settings.py); only OK if model endpoint allows EMPTY key."
+                f"{exp_name}: generation openai_key unresolved (env {openai_env} or project_settings.py); only OK if model endpoint allows EMPTY key."
             )
 
         run_eval_cur = bool(args.get("run_eval", run_eval_global))
-        if run_eval_cur and not ref_json.exists():
-            report.blocker(f"{exp.get('name', '<exp>')}: eval enabled but ref_json missing: {ref_json}")
+        cur_ref_json = _resolve_path(str(args.get("ref_json", global_cfg.get("ref_json", str(cur_in_path)))), repo_root)
+        if run_eval_cur and not cur_ref_json.exists():
+            report.blocker(f"{exp_name}: eval enabled but ref_json missing: {cur_ref_json}")
 
 
 def _require_path(cfg, key, repo_root, report, prefix):

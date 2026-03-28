@@ -1,0 +1,41 @@
+{
+  "global": {
+    "run_root": "./experiments/runs/llm_gt",
+    "input_json": "./data/longmemeval_data/longmemeval_s_cleaned.json",
+    "retriever": "flat-contriever",
+    "granularity": "session",
+    "dataset_name": "LongMemEval",
+    "gen_model_name": "qwen3.5-flash",
+    "gen_model_alias": "qwen35-flash",
+    "openai_key_env": "OPENAI_API_KEY",
+    "openai_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "openai_enable_thinking": false,
+    "topk_context": 10,
+    "history_format": "json",
+    "useronly": "false",
+    "cot": "false",
+    "con": "false",
+    "merge_key_expansion_into_value": "none",
+    "run_eval": false
+  },
+  "experiments": [
+    {
+      "name": "llmgt_retrieved_session",
+      "method": "llm_gt_baseline",
+      "args": {
+        "evidence_mode": "retrieved",
+        "granularity": "session",
+        "outfile_prefix": "llmgt_retrieved_session"
+      }
+    },
+    {
+      "name": "llmgt_oracle_session",
+      "method": "llm_gt_baseline",
+      "args": {
+        "evidence_mode": "oracle",
+        "granularity": "session",
+        "oracle_sanity_check": true
+      }
+    }
+  ]
+}

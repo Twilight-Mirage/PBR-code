@@ -265,22 +265,22 @@ def main():
     global_cfg = matrix.get("global", {})
     experiments = matrix.get("experiments", [])
 
-    in_file = global_cfg.get("in_file")
-    if not in_file:
-        in_file = default_longmemeval_input(global_cfg.get("data_type", "s"))
-    in_path = Path(in_file)
-    if not in_path.is_absolute():
-        in_path = (repo_root / in_path).resolve()
+    default_in_file = global_cfg.get("in_file")
+    if not default_in_file:
+        default_in_file = default_longmemeval_input(global_cfg.get("data_type", "s"))
+    default_in_path = Path(default_in_file)
+    if not default_in_path.is_absolute():
+        default_in_path = (repo_root / default_in_path).resolve()
     else:
-        in_path = in_path.resolve()
-    if not in_path.exists():
-        raise FileNotFoundError(f"Input file not found: {in_path}")
+        default_in_path = default_in_path.resolve()
+    if not default_in_path.exists():
+        raise FileNotFoundError(f"Default input file not found: {default_in_path}")
 
-    ref_json = Path(global_cfg.get("ref_json", str(in_path)))
-    if not ref_json.is_absolute():
-        ref_json = (repo_root / ref_json).resolve()
+    default_ref_json = Path(global_cfg.get("ref_json", str(default_in_path)))
+    if not default_ref_json.is_absolute():
+        default_ref_json = (repo_root / default_ref_json).resolve()
     else:
-        ref_json = ref_json.resolve()
+        default_ref_json = default_ref_json.resolve()
     run_eval = bool(global_cfg.get("run_eval", False))
 
     run_root = Path(global_cfg.get("run_root", "./experiments/runs/dua_e2e")).resolve()
@@ -302,12 +302,29 @@ def main():
         retrieval_out = run_dir / f"{name}_retrieval.json"
         generation_out = run_dir / f"{name}_hypotheses.jsonl"
 
+        local_args = exp.get("args", {})
+        cur_in_value = local_args.get("in_file", str(default_in_path))
+        cur_in_path = Path(cur_in_value)
+        if not cur_in_path.is_absolute():
+            cur_in_path = (repo_root / cur_in_path).resolve()
+        else:
+            cur_in_path = cur_in_path.resolve()
+        if not cur_in_path.exists():
+            raise FileNotFoundError(f"Experiment '{name}' input file not found: {cur_in_path}")
+
+        cur_ref_value = local_args.get("ref_json", global_cfg.get("ref_json", str(cur_in_path)))
+        cur_ref_json = Path(cur_ref_value)
+        if not cur_ref_json.is_absolute():
+            cur_ref_json = (repo_root / cur_ref_json).resolve()
+        else:
+            cur_ref_json = cur_ref_json.resolve()
+
         retrieval_cmd = build_retrieval_cmd(
             repo_root=repo_root,
             python_bin=args.python_bin,
             global_cfg=global_cfg,
             exp_cfg=exp,
-            retrieval_in=in_path,
+            retrieval_in=cur_in_path,
             retrieval_out=retrieval_out,
         )
         generation_cmd = build_generation_cmd(
@@ -325,7 +342,7 @@ def main():
             {"name": "generation", "cmd": generation_cmd, "cwd": str(repo_root)},
         ]
 
-        cur_run_eval = bool(exp.get("args", {}).get("run_eval", run_eval))
+        cur_run_eval = bool(local_args.get("run_eval", run_eval))
         if cur_run_eval:
             eval_cmd = build_eval_cmd(
                 repo_root=repo_root,
@@ -333,7 +350,7 @@ def main():
                 global_cfg=global_cfg,
                 exp_cfg=exp,
                 generation_out=generation_out,
-                ref_json=ref_json,
+                ref_json=cur_ref_json,
             )
             steps.append({"name": "eval", "cmd": eval_cmd, "cwd": str(repo_root)})
 
@@ -344,9 +361,10 @@ def main():
             "name": name,
             "matrix": str(matrix_path),
             "created_at": datetime.now().isoformat(timespec="seconds"),
+            "in_file": str(cur_in_path),
             "retrieval_output": str(retrieval_out),
             "generation_output": str(generation_out),
-            "ref_json": str(ref_json),
+            "ref_json": str(cur_ref_json),
             "steps": steps,
             "dry_run": bool(args.dry_run),
         }

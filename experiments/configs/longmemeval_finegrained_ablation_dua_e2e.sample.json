@@ -1,0 +1,239 @@
+﻿{
+  "global": {
+    "run_root": "./experiments/runs/dua_finegrained_ablation",
+    "in_file": "./data/longmemeval_data/longmemeval_s_cleaned.json",
+    "ref_json": "./data/longmemeval_data/longmemeval_s_cleaned.json",
+    "data_type": "s",
+    "k_seed": 10,
+    "top_k_retrieval": 10,
+
+    "gen_model_name": "qwen3.5-flash",
+    "gen_model_alias": "qwen3.5-flash",
+    "openai_key_env": "DASHSCOPE_API_KEY",
+    "openai_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+
+    "llm_model": "qwen3.5-flash",
+    "llm_api_key_env": "DASHSCOPE_API_KEY",
+    "llm_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+
+    "history_format": "json",
+    "retriever_type": "flat-session",
+    "topk_context": 10,
+    "useronly": "false",
+    "cot": "false",
+    "con": "false",
+    "merge_key_expansion_into_value": "none",
+
+    "run_eval": true,
+    "eval_model": "gpt-4o-mini"
+  },
+  "experiments": [
+    {
+      "name": "dua_full",
+      "model_type": "PBR++",
+      "temporal_profile": true,
+      "cold_start_router": true,
+      "explicit_profile": true,
+      "save_suffix": "_ab_full",
+      "args": {
+        "temporal_decay_lambda": 0.05,
+        "temporal_util_alpha": 4.0,
+        "temporal_util_bias": 0.0,
+        "temporal_rerank_beta": 0.4,
+        "temporal_graph_decay": 0.02,
+        "short_term_blend": 0.5,
+
+        "cold_start_prototype_bank": "./data/longmemeval_data/prototype_bank_longmemeval_s.json",
+        "cold_start_k": 3.0,
+        "cold_start_supervised_weight": 0.6,
+        "cold_start_anchor_mix": 0.35,
+        "cold_start_seed_profile_alpha": 0.2,
+        "cold_start_rerank_alpha": 0.25,
+        "cold_start_label_keys": "department,role,team",
+
+        "explicit_profile_mix": 0.25,
+        "explicit_feature_topk": 12,
+        "explicit_seed_feature_alpha": 0.15,
+        "explicit_rerank_alpha": 0.2,
+        "contrastive_examples_k": 2,
+        "contrastive_max_words": 90,
+        "explicit_encoder_ckpt": "./data/longmemeval_data/explicit_user_encoder_s.pt",
+        "explicit_encoder_device": "cpu"
+      }
+    },
+    {
+      "name": "ab_wo_dynamic_update",
+      "model_type": "PBR",
+      "temporal_profile": false,
+      "cold_start_router": true,
+      "explicit_profile": true,
+      "save_suffix": "_ab_wo_dynamic",
+      "args": {
+        "cold_start_prototype_bank": "./data/longmemeval_data/prototype_bank_longmemeval_s.json",
+        "cold_start_k": 3.0,
+        "cold_start_supervised_weight": 0.6,
+        "cold_start_anchor_mix": 0.35,
+        "cold_start_seed_profile_alpha": 0.2,
+        "cold_start_rerank_alpha": 0.25,
+        "cold_start_label_keys": "department,role,team",
+
+        "explicit_profile_mix": 0.25,
+        "explicit_feature_topk": 12,
+        "explicit_seed_feature_alpha": 0.15,
+        "explicit_rerank_alpha": 0.2,
+        "contrastive_examples_k": 2,
+        "contrastive_max_words": 90,
+        "explicit_encoder_ckpt": "./data/longmemeval_data/explicit_user_encoder_s.pt",
+        "explicit_encoder_device": "cpu"
+      }
+    },
+    {
+      "name": "ab_wo_cold_start_supplement",
+      "model_type": "PBR++",
+      "temporal_profile": true,
+      "cold_start_router": false,
+      "explicit_profile": true,
+      "save_suffix": "_ab_wo_cold",
+      "args": {
+        "temporal_decay_lambda": 0.05,
+        "temporal_util_alpha": 4.0,
+        "temporal_util_bias": 0.0,
+        "temporal_rerank_beta": 0.4,
+        "temporal_graph_decay": 0.02,
+        "short_term_blend": 0.5,
+
+        "explicit_profile_mix": 0.25,
+        "explicit_feature_topk": 12,
+        "explicit_seed_feature_alpha": 0.15,
+        "explicit_rerank_alpha": 0.2,
+        "contrastive_examples_k": 2,
+        "contrastive_max_words": 90,
+        "explicit_encoder_ckpt": "./data/longmemeval_data/explicit_user_encoder_s.pt",
+        "explicit_encoder_device": "cpu"
+      }
+    },
+    {
+      "name": "ab_wo_explicit_user_rep",
+      "model_type": "PBR++",
+      "temporal_profile": true,
+      "cold_start_router": true,
+      "explicit_profile": false,
+      "save_suffix": "_ab_wo_explicit",
+      "args": {
+        "temporal_decay_lambda": 0.05,
+        "temporal_util_alpha": 4.0,
+        "temporal_util_bias": 0.0,
+        "temporal_rerank_beta": 0.4,
+        "temporal_graph_decay": 0.02,
+        "short_term_blend": 0.5,
+
+        "cold_start_prototype_bank": "./data/longmemeval_data/prototype_bank_longmemeval_s.json",
+        "cold_start_k": 3.0,
+        "cold_start_supervised_weight": 0.6,
+        "cold_start_anchor_mix": 0.35,
+        "cold_start_seed_profile_alpha": 0.2,
+        "cold_start_rerank_alpha": 0.25,
+        "cold_start_label_keys": "department,role,team"
+      }
+    },
+    {
+      "name": "ab_wo_contrastive_prompt",
+      "model_type": "PBR++",
+      "temporal_profile": true,
+      "cold_start_router": true,
+      "explicit_profile": true,
+      "save_suffix": "_ab_wo_contrastive_prompt",
+      "args": {
+        "temporal_decay_lambda": 0.05,
+        "temporal_util_alpha": 4.0,
+        "temporal_util_bias": 0.0,
+        "temporal_rerank_beta": 0.4,
+        "temporal_graph_decay": 0.02,
+        "short_term_blend": 0.5,
+
+        "cold_start_prototype_bank": "./data/longmemeval_data/prototype_bank_longmemeval_s.json",
+        "cold_start_k": 3.0,
+        "cold_start_supervised_weight": 0.6,
+        "cold_start_anchor_mix": 0.35,
+        "cold_start_seed_profile_alpha": 0.2,
+        "cold_start_rerank_alpha": 0.25,
+        "cold_start_label_keys": "department,role,team",
+
+        "explicit_profile_mix": 0.25,
+        "explicit_feature_topk": 12,
+        "explicit_seed_feature_alpha": 0.15,
+        "explicit_rerank_alpha": 0.2,
+        "contrastive_examples_k": 0,
+        "contrastive_max_words": 90,
+        "explicit_encoder_ckpt": "./data/longmemeval_data/explicit_user_encoder_s.pt",
+        "explicit_encoder_device": "cpu"
+      }
+    },
+    {
+      "name": "ab_wo_contrastive_learning",
+      "model_type": "PBR++",
+      "temporal_profile": true,
+      "cold_start_router": true,
+      "explicit_profile": true,
+      "save_suffix": "_ab_wo_contrastive_learning",
+      "args": {
+        "temporal_decay_lambda": 0.05,
+        "temporal_util_alpha": 4.0,
+        "temporal_util_bias": 0.0,
+        "temporal_rerank_beta": 0.4,
+        "temporal_graph_decay": 0.02,
+        "short_term_blend": 0.5,
+
+        "cold_start_prototype_bank": "./data/longmemeval_data/prototype_bank_longmemeval_s.json",
+        "cold_start_k": 3.0,
+        "cold_start_supervised_weight": 0.6,
+        "cold_start_anchor_mix": 0.35,
+        "cold_start_seed_profile_alpha": 0.2,
+        "cold_start_rerank_alpha": 0.25,
+        "cold_start_label_keys": "department,role,team",
+
+        "explicit_profile_mix": 0.25,
+        "explicit_feature_topk": 12,
+        "explicit_seed_feature_alpha": 0.15,
+        "explicit_rerank_alpha": 0.2,
+        "contrastive_examples_k": 2,
+        "contrastive_max_words": 90,
+        "explicit_encoder_ckpt": "",
+        "explicit_encoder_device": "cpu"
+      }
+    },
+    {
+      "name": "ab_wo_hard_negatives",
+      "model_type": "PBR++",
+      "temporal_profile": true,
+      "cold_start_router": true,
+      "explicit_profile": true,
+      "save_suffix": "_ab_wo_hard_neg",
+      "args": {
+        "temporal_decay_lambda": 0.05,
+        "temporal_util_alpha": 4.0,
+        "temporal_util_bias": 0.0,
+        "temporal_rerank_beta": 0.4,
+        "temporal_graph_decay": 0.02,
+        "short_term_blend": 0.5,
+
+        "cold_start_prototype_bank": "./data/longmemeval_data/prototype_bank_longmemeval_s.json",
+        "cold_start_k": 3.0,
+        "cold_start_supervised_weight": 0.6,
+        "cold_start_anchor_mix": 0.35,
+        "cold_start_seed_profile_alpha": 0.2,
+        "cold_start_rerank_alpha": 0.25,
+        "cold_start_label_keys": "department,role,team",
+
+        "explicit_profile_mix": 0.25,
+        "explicit_feature_topk": 12,
+        "explicit_seed_feature_alpha": 0.15,
+        "explicit_rerank_alpha": 0.2,
+        "contrastive_examples_k": 2,
+        "contrastive_max_words": 90,
+        "explicit_encoder_ckpt": "./data/longmemeval_data/explicit_user_encoder_s_random_neg.pt",
+        "explicit_encoder_device": "cpu"
+      }
+    }
+  ]
+}
