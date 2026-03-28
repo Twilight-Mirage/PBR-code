@@ -799,19 +799,26 @@ if __name__ == "__main__":
         "--cold_start_m0",
         type=int,
         default=3,
-        help="Deprecated compatibility arg (fallback for cold_start_k when not provided).",
+        help="Fallback threshold when cold_start_k/cold_start_tau are not explicitly provided.",
     )
     parser.add_argument(
         "--cold_start_tau",
         type=float,
         default=2.0,
-        help="Deprecated compatibility arg from exponential gate.",
+        help="Exponential gate temperature in lambda=1-exp(-|H|/tau).",
     )
     parser.add_argument(
         "--cold_start_k",
         type=float,
-        default=3.0,
-        help="Linear gate threshold K in lambda=min(1, |H|/K).",
+        default=None,
+        help="Linear gate threshold K in lambda=min(1, |H|/K). If omitted, router may use tau/m0 fallback.",
+    )
+    parser.add_argument(
+        "--cold_start_gate",
+        type=str,
+        default="auto",
+        choices=["auto", "linear", "exp"],
+        help="History-cohort mixing schedule: auto/linear/exp.",
     )
     parser.add_argument(
         "--cold_start_min_cluster_size",
@@ -1008,6 +1015,7 @@ if __name__ == "__main__":
         "cold_start_m0": args.cold_start_m0,
         "cold_start_tau": args.cold_start_tau,
         "cold_start_k": args.cold_start_k,
+        "cold_start_gate": args.cold_start_gate,
         "cold_start_supervised_weight": args.cold_start_supervised_weight,
         "cold_start_prefer_supervised": args.cold_start_prefer_supervised,
         "cold_start_label_keys": cold_start_label_keys,

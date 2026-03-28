@@ -20,22 +20,51 @@ def load_prototype_bank(path):
     return json.loads(p.read_text(encoding="utf-8-sig"))
 
 
+def _optional_float(value):
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip() == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 class ColdStartRouter:
     """
     Router for Algorithm B:
     - m == 0      -> cohort_only
-    - 0 < m < m0  -> blend
-    - m >= m0     -> individual
+    - 0 < m < t   -> blend
+    - m >= t      -> individual
 
     Cohort prototype is built from:
     1) supervised labels (department / role / team, etc.)
     2) unsupervised centroids
+
+    Blending schedule:
+    - linear: lambda = min(1, m / K)
+    - exp:    lambda = 1 - exp(-m / tau)
+    - auto:   if K is explicitly provided -> linear; otherwise if tau is provided -> exp;
+              else fallback to linear with m0.
     """
 
     def __init__(self, cfg=None):
         cfg = cfg or {}
         self.enable = bool(cfg.get("enable_cold_start_router", False))
-        self.cold_start_k = float(cfg.get("cold_start_k", cfg.get("cold_start_m0", 3)))
+
+        self.cold_start_m0 = int(cfg.get("cold_start_m0", 3))
+        self.cold_start_k = _optional_float(cfg.get("cold_start_k", None))
+        self.cold_start_tau = _optional_float(cfg.get("cold_start_tau", None))
+
+        if self.cold_start_k is not None and self.cold_start_k <= 0:
+            self.cold_start_k = None
+        if self.cold_start_tau is not None and self.cold_start_tau <= 0:
+            self.cold_start_tau = None
+
+        gate = str(cfg.get("cold_start_gate", "auto")).strip().lower()
+        self.cold_start_gate = gate if gate in {"auto", "linear", "exp"} else "auto"
+
         self.supervised_weight = float(cfg.get("cold_start_supervised_weight", 0.6))
         self.prefer_supervised = bool(cfg.get("cold_start_prefer_supervised", True))
         self.label_keys = list(cfg.get("cold_start_label_keys", ["department", "role", "team"]))
@@ -150,6 +179,29 @@ class ColdStartRouter:
         out_meta["prototype_source"] = "none"
         return None, out_meta
 
+    def _resolve_history_lambda(self, m):
+        gate = self.cold_start_gate
+        if gate == "auto":
+            if self.cold_start_k is not None:
+                gate = "linear"
+            elif self.cold_start_tau is not None:
+                gate = "exp"
+            else:
+                gate = "linear"
+
+        if gate == "exp":
+            tau = self.cold_start_tau
+            if tau is None:
+                tau = float(max(self.cold_start_m0, 1))
+            lam = 1.0 - float(np.exp(-float(m) / max(tau, 1e-8)))
+            return float(np.clip(lam, 0.0, 1.0)), "exp", {"tau": float(tau)}
+
+        k = self.cold_start_k
+        if k is None:
+            k = float(max(self.cold_start_m0, 1))
+        lam = float(min(1.0, float(m) / max(k, 1e-8)))
+        return float(np.clip(lam, 0.0, 1.0)), "linear", {"k": float(k)}
+
     def route(self, test_item, query_embedding, user_history_embedding, user_history_size):
         if not self.available:
             out = user_history_embedding if user_history_embedding is not None else query_embedding
@@ -164,11 +216,25 @@ class ColdStartRouter:
 
         m = int(user_history_size)
         if m <= 0 or user_history_embedding is None:
-            return cohort_proto, {"mode": "cohort_only", "history_lambda": 0.0, "meta": meta}
+            return cohort_proto, {
+                "mode": "cohort_only",
+                "history_lambda": 0.0,
+                "history_gate": None,
+                "meta": meta,
+            }
 
-        lam = float(min(1.0, m / max(self.cold_start_k, 1e-8)))
+        lam, gate, gate_meta = self._resolve_history_lambda(m)
         if lam < 1.0:
             blended = l2_normalize(lam * user_history_embedding + (1 - lam) * cohort_proto)
-            return blended, {"mode": "blend", "history_lambda": lam, "meta": meta}
+            out = {"mode": "blend", "history_lambda": lam, "history_gate": gate, "meta": meta}
+            out.update(gate_meta)
+            return blended, out
 
-        return l2_normalize(user_history_embedding), {"mode": "individual", "history_lambda": 1.0, "meta": meta}
+        out = {
+            "mode": "individual",
+            "history_lambda": 1.0,
+            "history_gate": gate,
+            "meta": meta,
+        }
+        out.update(gate_meta)
+        return l2_normalize(user_history_embedding), out
