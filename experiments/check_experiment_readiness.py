@@ -164,6 +164,36 @@ def _require_path(cfg, key, repo_root, report, prefix):
     return p
 
 
+
+def _check_unified_eval_requirements(prefix, method, args, global_cfg, repo_root, report):
+    if not bool(args.get("unified_eval", global_cfg.get("unified_eval", False))):
+        return
+
+    ref_json = args.get("ref_json", global_cfg.get("ref_json", global_cfg.get("input_json", global_cfg.get("in_file"))))
+    if not ref_json:
+        report.blocker(f"{prefix}: unified_eval=true but ref_json is missing.")
+    else:
+        rp = _resolve_path(str(ref_json), repo_root)
+        if not rp.exists():
+            report.blocker(f"{prefix}: unified_eval ref_json not found: {rp}")
+
+    adapter_pred_file = args.get("adapter_pred_file")
+    if adapter_pred_file:
+        pp = _resolve_path(str(adapter_pred_file), repo_root)
+        if not pp.exists():
+            report.blocker(f"{prefix}: adapter_pred_file not found: {pp}")
+        return
+
+    if method == "lightrag_official":
+        report.blocker(f"{prefix}: unified_eval for LightRAG requires args.adapter_pred_file (no stable official benchmark output path).")
+        return
+
+    if method == "pgraphrag_official":
+        modes = args.get("mode") if isinstance(args.get("mode"), list) else []
+        ks = args.get("k") if isinstance(args.get("k"), list) else []
+        if len(modes) != 1 or len(ks) != 1:
+            report.blocker(f"{prefix}: unified_eval without adapter_pred_file requires exactly one mode and one k for auto output inference.")
+
 def check_baseline_matrix(matrix_path: Path, repo_root: Path, report: ReadinessReport):
     matrix = _load_json(matrix_path)
     global_cfg = matrix.get("global", {})
@@ -204,6 +234,40 @@ def check_baseline_matrix(matrix_path: Path, repo_root: Path, report: ReadinessR
             key, env_name = _resolve_key(args, global_cfg, "openai_key", "openai_key_env", "OPENAI_API_KEY")
             if not key:
                 report.warn(f"{prefix}: openai_key unresolved (env {env_name} or project_settings.py); generation may fail unless endpoint accepts EMPTY key.")
+            continue
+        if method in {"pbr_pipeline", "dua_rag"}:
+            input_json = args.get("input_json", args.get("in_file", global_cfg.get("input_json", global_cfg.get("in_file"))))
+            if not input_json:
+                data_type = global_cfg.get("data_type", "s")
+                input_json = default_longmemeval_input(data_type=data_type)
+            p = _resolve_path(str(input_json), repo_root)
+            if not p.exists():
+                report.blocker(f"{prefix}: input_json/in_file not found: {p}")
+
+            if method == "dua_rag":
+                if bool(args.get("cold_start_router", True)):
+                    _check_prototype_bank(global_cfg, {"name": name, "args": args}, repo_root, report)
+                if bool(args.get("explicit_profile", True)):
+                    _check_explicit_encoder(global_cfg, {"name": name, "args": args}, repo_root, report)
+            else:
+                if bool(args.get("cold_start_router", False)):
+                    _check_prototype_bank(global_cfg, {"name": name, "args": args}, repo_root, report)
+                if bool(args.get("explicit_profile", False)):
+                    _check_explicit_encoder(global_cfg, {"name": name, "args": args}, repo_root, report)
+
+            llm_key, llm_env = _resolve_key(args, global_cfg, "llm_api_key", "llm_api_key_env", "OPENAI_API_KEY")
+            if not llm_key:
+                report.blocker(f"{prefix}: missing retrieval LLM key (set llm_api_key, env {llm_env}, or project_settings.py).")
+
+            key, env_name = _resolve_key(args, global_cfg, "openai_key", "openai_key_env", "OPENAI_API_KEY")
+            if not key:
+                report.warn(f"{prefix}: openai_key unresolved (env {env_name} or project_settings.py); generation may fail unless endpoint accepts EMPTY key.")
+
+            if bool(args.get("run_eval", global_cfg.get("run_eval", False))):
+                ref_json = args.get("ref_json", global_cfg.get("ref_json", input_json))
+                rp = _resolve_path(str(ref_json), repo_root)
+                if not rp.exists():
+                    report.blocker(f"{prefix}: eval enabled but ref_json not found: {rp}")
             continue
         if method == "llm_gt_baseline":
             input_json = args.get("input_json", global_cfg.get("input_json"))
@@ -255,6 +319,7 @@ def check_baseline_matrix(matrix_path: Path, repo_root: Path, report: ReadinessR
             continue
 
         if method == "pgraphrag_official":
+            _check_unified_eval_requirements(prefix, method, args, global_cfg, repo_root, report)
             repo = _resolve_path(
                 str(args.get("repo_path", global_cfg.get("pgraphrag_repo", "./third_party_baselines/PGraphRAG"))), repo_root
             )
@@ -264,6 +329,7 @@ def check_baseline_matrix(matrix_path: Path, repo_root: Path, report: ReadinessR
             continue
 
         if method == "afce_official":
+            _check_unified_eval_requirements(prefix, method, args, global_cfg, repo_root, report)
             repo = _resolve_path(
                 str(args.get("repo_path", global_cfg.get("afce_repo", "./third_party_baselines/AP-Bots"))), repo_root
             )
@@ -277,6 +343,7 @@ def check_baseline_matrix(matrix_path: Path, repo_root: Path, report: ReadinessR
             continue
 
         if method == "lightrag_official":
+            _check_unified_eval_requirements(prefix, method, args, global_cfg, repo_root, report)
             repo = _resolve_path(
                 str(args.get("repo_path", global_cfg.get("lightrag_repo", "./third_party_baselines/LightRAG"))), repo_root
             )

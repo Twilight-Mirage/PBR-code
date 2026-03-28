@@ -11,7 +11,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from src.common.project_runtime import default_longmemeval_input, resolve_api_key as resolve_project_api_key
+from src.common.project_runtime import (
+    default_longmemeval_input,
+    resolve_api_key as resolve_project_api_key,
+    resolve_default_embedding_task,
+    resolve_default_retrieval_model_name,
+)
 
 
 def ensure_dir(path):
@@ -55,6 +60,17 @@ def run_step(step, dry_run=False):
     if not dry_run:
         subprocess.run(cmd, cwd=cwd, check=True, env=build_subprocess_env())
 
+
+
+def add_cli_arg(cmd, key, value):
+    flag = f"--{key}"
+    if value is None:
+        return
+    if isinstance(value, bool):
+        if value:
+            cmd.append(flag)
+        return
+    cmd.extend([flag, str(value)])
 
 def _require_field(cfg, key, exp_name, method):
     if key not in cfg or cfg[key] in (None, ""):
@@ -293,9 +309,79 @@ def build_history_rag_steps(repo_root, python_bin, global_cfg, exp):
     return steps, metadata
 
 
+
+def _append_unified_adapter_eval_steps(steps, metadata, repo_root, python_bin, run_dir, exp_name, baseline_name, cfg, global_cfg, pred_file_hint=None, extra_adapter_args=None):
+    if not bool(cfg.get("unified_eval", global_cfg.get("unified_eval", False))):
+        return steps, metadata
+
+    ref_json = cfg.get("ref_json", global_cfg.get("ref_json", global_cfg.get("input_json", global_cfg.get("in_file", ""))))
+    if not ref_json:
+        raise ValueError(f"Experiment '{exp_name}' ({baseline_name}) unified_eval=true but ref_json is missing.")
+    ref_path = _resolve_existing_path(ref_json, exp_name, baseline_name, "ref_json")
+
+    unified_out = Path(cfg.get("unified_out", Path(run_dir) / f"{exp_name}_unified_hypotheses.jsonl"))
+    if not unified_out.is_absolute():
+        unified_out = (Path(repo_root) / unified_out).resolve()
+
+    adapter_cmd = [
+        python_bin,
+        "-m",
+        "experiments.adapt_official_baseline_output",
+        "--baseline",
+        baseline_name,
+        "--out_file",
+        str(unified_out),
+        "--ref_file",
+        str(ref_path),
+    ]
+
+    adapter_pred_file = cfg.get("adapter_pred_file")
+    if adapter_pred_file:
+        adapter_pred_path = _resolve_existing_path(adapter_pred_file, exp_name, baseline_name, "adapter_pred_file")
+        adapter_cmd.extend(["--pred_file", str(adapter_pred_path)])
+    elif pred_file_hint:
+        adapter_cmd.extend(["--pred_file", str(pred_file_hint)])
+
+    id_map_json = cfg.get("id_map_json")
+    if id_map_json:
+        id_map_path = _resolve_existing_path(id_map_json, exp_name, baseline_name, "id_map_json")
+        adapter_cmd.extend(["--id_map_json", str(id_map_path)])
+
+    for key in ("id_field", "hyp_field", "root_field", "ref_id_field", "ref_match_field"):
+        value = cfg.get(key, global_cfg.get(key))
+        if value not in (None, ""):
+            adapter_cmd.extend([f"--{key}", str(value)])
+    if bool(cfg.get("use_index_if_missing_id", global_cfg.get("use_index_if_missing_id", False))):
+        adapter_cmd.append("--use_index_if_missing_id")
+    if bool(cfg.get("adapter_strict", global_cfg.get("adapter_strict", False))):
+        adapter_cmd.append("--strict")
+
+    if isinstance(extra_adapter_args, list):
+        adapter_cmd.extend([str(x) for x in extra_adapter_args])
+
+    steps.append({"name": "adapt_to_unified", "cmd": adapter_cmd, "cwd": str(repo_root)})
+
+    eval_model = cfg.get("eval_model", global_cfg.get("eval_model", "gpt-4o-mini"))
+    eval_cmd = [
+        python_bin,
+        "-m",
+        "src.evaluation.evaluate_qa",
+        str(eval_model),
+        str(unified_out),
+        str(ref_path),
+    ]
+    steps.append({"name": "eval_unified", "cmd": eval_cmd, "cwd": str(repo_root)})
+
+    metadata["unified_output"] = str(unified_out)
+    metadata["unified_ref"] = str(ref_path)
+    return steps, metadata
 def build_pgraphrag_steps(repo_root, python_bin, global_cfg, exp):
     exp_name = exp["name"]
     cfg = exp.get("args", {})
+    run_root = Path(global_cfg.get("run_root", "./experiments/runs")).resolve()
+    run_dir = run_root / exp_name
+    ensure_dir(run_dir)
+
     repo = _resolve_existing_path(
         cfg.get("repo_path", global_cfg.get("pgraphrag_repo", "./third_party_baselines/PGraphRAG")),
         exp_name,
@@ -310,17 +396,63 @@ def build_pgraphrag_steps(repo_root, python_bin, global_cfg, exp):
     )
     model = cfg.get("model", global_cfg.get("pgraphrag_model", "gpt"))
 
+    modes = cfg.get("mode") if isinstance(cfg.get("mode"), list) and cfg["mode"] else []
+    ks = cfg.get("k") if isinstance(cfg.get("k"), list) and cfg["k"] else []
+
     cmd = [python_bin, "master_generation.py", "--input", str(input_path), "--model", str(model)]
-    if isinstance(cfg.get("mode"), list) and cfg["mode"]:
-        cmd.extend(["--mode"] + [str(x) for x in cfg["mode"]])
-    if isinstance(cfg.get("k"), list) and cfg["k"]:
-        cmd.extend(["--k"] + [str(x) for x in cfg["k"]])
-    return [{"name": "pgraphrag_generation", "cmd": cmd, "cwd": str(repo)}], {"repo": str(repo)}
+    if modes:
+        cmd.extend(["--mode"] + [str(x) for x in modes])
+    if ks:
+        cmd.extend(["--k"] + [str(x) for x in ks])
+
+    steps = [{"name": "pgraphrag_generation", "cmd": cmd, "cwd": str(repo)}]
+    metadata = {"repo": str(repo)}
+
+    pred_file_hint = None
+    if len(modes) == 1 and len(ks) == 1:
+        filename = Path(input_path).stem
+        if filename.startswith("RANKING-"):
+            filename = filename[len("RANKING-"):]
+        parts = filename.split("_")
+        if len(parts) >= 4:
+            dataset, split, task, ranker = parts[0], parts[1], parts[2], parts[3]
+            model_tag = str(model).upper()
+            pred_file_hint = repo / "results" / dataset / split / task / model_tag / ranker / f"OUTPUT-{dataset}_{split}_{task}_{model_tag}_{ranker}-{modes[0]}_k{ks[0]}.json"
+
+    adapter_extra = []
+    if not pred_file_hint:
+        if len(modes) == 1 and len(ks) == 1:
+            adapter_extra.extend([
+                "--repo_root", str(repo),
+                "--ranking_input", str(input_path),
+                "--model", str(model),
+                "--mode", str(modes[0]),
+                "--k", str(ks[0]),
+            ])
+
+    steps, metadata = _append_unified_adapter_eval_steps(
+        steps=steps,
+        metadata=metadata,
+        repo_root=repo_root,
+        python_bin=python_bin,
+        run_dir=run_dir,
+        exp_name=exp_name,
+        baseline_name="pgraphrag",
+        cfg=cfg,
+        global_cfg=global_cfg,
+        pred_file_hint=pred_file_hint,
+        extra_adapter_args=adapter_extra if adapter_extra else None,
+    )
+    return steps, metadata
 
 
 def build_afce_steps(repo_root, python_bin, global_cfg, exp):
     exp_name = exp["name"]
     cfg = exp.get("args", {})
+    run_root = Path(global_cfg.get("run_root", "./experiments/runs")).resolve()
+    run_dir = run_root / exp_name
+    ensure_dir(run_dir)
+
     repo = _resolve_existing_path(
         cfg.get("repo_path", global_cfg.get("afce_repo", "./third_party_baselines/AP-Bots")),
         exp_name,
@@ -343,12 +475,34 @@ def build_afce_steps(repo_root, python_bin, global_cfg, exp):
         cmd.append("--openai_batch")
     if cfg.get("prompt_style"):
         cmd.extend(["-ps", str(cfg["prompt_style"])])
-    return [{"name": "afce_run_exp", "cmd": cmd, "cwd": str(repo)}], {"repo": str(repo)}
+
+    steps = [{"name": "afce_run_exp", "cmd": cmd, "cwd": str(repo)}]
+    metadata = {"repo": str(repo)}
+
+    adapter_extra = ["--repo_root", str(repo), "--dataset_tag", str(dataset)]
+    steps, metadata = _append_unified_adapter_eval_steps(
+        steps=steps,
+        metadata=metadata,
+        repo_root=repo_root,
+        python_bin=python_bin,
+        run_dir=run_dir,
+        exp_name=exp_name,
+        baseline_name="afce",
+        cfg=cfg,
+        global_cfg=global_cfg,
+        pred_file_hint=None,
+        extra_adapter_args=adapter_extra,
+    )
+    return steps, metadata
 
 
 def build_lightrag_steps(repo_root, python_bin, global_cfg, exp):
     exp_name = exp["name"]
     cfg = exp.get("args", {})
+    run_root = Path(global_cfg.get("run_root", "./experiments/runs")).resolve()
+    run_dir = run_root / exp_name
+    ensure_dir(run_dir)
+
     repo = _resolve_existing_path(
         cfg.get("repo_path", global_cfg.get("lightrag_repo", "./third_party_baselines/LightRAG")),
         exp_name,
@@ -363,7 +517,25 @@ def build_lightrag_steps(repo_root, python_bin, global_cfg, exp):
         cmd = [python_bin, str(entry_script)]
         if isinstance(cfg.get("entry_args"), list):
             cmd.extend([str(x) for x in cfg["entry_args"]])
-    return [{"name": "lightrag_run", "cmd": cmd, "cwd": str(repo)}], {"repo": str(repo)}
+
+    steps = [{"name": "lightrag_run", "cmd": cmd, "cwd": str(repo)}]
+    metadata = {"repo": str(repo)}
+
+    # For LightRAG, explicit adapter_pred_file is typically required because official demos do not emit a fixed benchmark output path.
+    steps, metadata = _append_unified_adapter_eval_steps(
+        steps=steps,
+        metadata=metadata,
+        repo_root=repo_root,
+        python_bin=python_bin,
+        run_dir=run_dir,
+        exp_name=exp_name,
+        baseline_name="lightrag",
+        cfg=cfg,
+        global_cfg=global_cfg,
+        pred_file_hint=None,
+        extra_adapter_args=None,
+    )
+    return steps, metadata
 
 
 def build_llm_gt_steps(repo_root, python_bin, global_cfg, exp):
@@ -537,6 +709,165 @@ def build_llm_gt_steps(repo_root, python_bin, global_cfg, exp):
 
     return steps, metadata
 
+
+def build_pbr_family_steps(repo_root, python_bin, global_cfg, exp, method_defaults):
+    exp_name = exp["name"]
+    cfg = exp.get("args", {})
+    run_root = Path(global_cfg.get("run_root", "./experiments/runs")).resolve()
+    run_dir = run_root / exp_name
+    ensure_dir(run_dir)
+
+    input_json = cfg.get("input_json", cfg.get("in_file", global_cfg.get("input_json", global_cfg.get("in_file", default_longmemeval_input("s")))))
+    if not input_json:
+        raise ValueError(f"Experiment '{exp_name}' missing input_json/in_file.")
+    in_file = _resolve_existing_path(input_json, exp_name, exp.get("method", "pbr_family"), "input_json")
+
+    retrieval_out = str(run_dir / f"{exp_name}_retrieval.json")
+
+    retrieval_model_name = cfg.get(
+        "retrieval_model_name",
+        global_cfg.get("retrieval_model_name", resolve_default_retrieval_model_name()),
+    )
+    embedding_task = cfg.get(
+        "embedding_task",
+        global_cfg.get("embedding_task", resolve_default_embedding_task()),
+    )
+
+    retrieval_cmd = [python_bin, "-m", "src.retrieval.retrieval_PBR"]
+    add_cli_arg(retrieval_cmd, "model_type", cfg.get("model_type", method_defaults.get("model_type", "PBR")))
+    add_cli_arg(retrieval_cmd, "data_type", cfg.get("data_type", global_cfg.get("data_type", "s")))
+    add_cli_arg(retrieval_cmd, "retrieval_model_name", retrieval_model_name)
+    add_cli_arg(retrieval_cmd, "embedding_task", embedding_task)
+    add_cli_arg(retrieval_cmd, "in_file", str(in_file))
+    add_cli_arg(retrieval_cmd, "out_file", retrieval_out)
+    add_cli_arg(retrieval_cmd, "save_suffix", cfg.get("save_suffix", f"_exp_{exp_name}"))
+
+    temporal_enabled = bool(cfg.get("temporal_profile", method_defaults.get("temporal_profile", False)))
+    cold_enabled = bool(cfg.get("cold_start_router", method_defaults.get("cold_start_router", False)))
+    explicit_enabled = bool(cfg.get("explicit_profile", method_defaults.get("explicit_profile", False)))
+    add_cli_arg(retrieval_cmd, "temporal_profile", temporal_enabled)
+    add_cli_arg(retrieval_cmd, "cold_start_router", cold_enabled)
+    add_cli_arg(retrieval_cmd, "explicit_profile", explicit_enabled)
+
+    llm_key, llm_env = _resolve_key(cfg, global_cfg, "llm_api_key", "llm_api_key_env", "OPENAI_API_KEY")
+    if llm_key:
+        add_cli_arg(retrieval_cmd, "llm_api_key", llm_key)
+    add_cli_arg(retrieval_cmd, "llm_api_key_env", cfg.get("llm_api_key_env", global_cfg.get("llm_api_key_env", llm_env)))
+    add_cli_arg(retrieval_cmd, "llm_base_url", cfg.get("llm_base_url", global_cfg.get("llm_base_url", "")))
+    add_cli_arg(retrieval_cmd, "llm_model", cfg.get("llm_model", global_cfg.get("llm_model", "gpt-4o-mini")))
+    add_cli_arg(retrieval_cmd, "llm_max_tokens", cfg.get("llm_max_tokens", global_cfg.get("llm_max_tokens", 512)))
+    add_cli_arg(retrieval_cmd, "llm_temperature", cfg.get("llm_temperature", global_cfg.get("llm_temperature", 0.0)))
+    add_cli_arg(retrieval_cmd, "llm_enable_thinking", cfg.get("llm_enable_thinking", global_cfg.get("llm_enable_thinking", False)))
+    add_cli_arg(retrieval_cmd, "llm_extra_body_json", cfg.get("llm_extra_body_json", global_cfg.get("llm_extra_body_json", None)))
+
+    reserved = {
+        "input_json", "in_file", "ref_json", "run_eval", "eval_model",
+        "openai_key", "openai_key_env", "openai_base_url", "openai_organization",
+        "openai_enable_thinking", "openai_extra_body_json",
+        "gen_model_name", "gen_model_alias", "gen_length",
+        "history_format", "useronly", "cot", "con", "topk_context", "retriever_type",
+        "merge_key_expansion_into_value",
+        "retrieval_model_name", "embedding_task",
+        "model_type", "temporal_profile", "cold_start_router", "explicit_profile", "save_suffix",
+        "llm_api_key", "llm_api_key_env", "llm_base_url", "llm_model", "llm_max_tokens", "llm_temperature", "llm_enable_thinking", "llm_extra_body_json",
+    }
+    for k, v in cfg.items():
+        if k in reserved:
+            continue
+        add_cli_arg(retrieval_cmd, k, v)
+
+    gen = _local_gen_common(global_cfg, cfg, run_dir, exp_name)
+    generation_cmd = [
+        python_bin,
+        "-m",
+        "src.generation.run_generation",
+        "--in_file",
+        retrieval_out,
+        "--out_dir",
+        str(run_dir),
+        "--out_file",
+        gen["out_file"],
+        "--model_name",
+        gen["model_name"],
+        "--model_alias",
+        gen["model_alias"],
+        "--openai_key",
+        gen["openai_key"],
+        "--retriever_type",
+        str(cfg.get("retriever_type", global_cfg.get("retriever_type", "flat-session"))),
+        "--topk_context",
+        str(gen["topk_context"]),
+        "--history_format",
+        gen["history_format"],
+        "--useronly",
+        gen["useronly"],
+        "--cot",
+        gen["cot"],
+        "--con",
+        gen["con"],
+        "--merge_key_expansion_into_value",
+        gen["merge_key_expansion_into_value"],
+    ]
+    if gen["openai_base_url"]:
+        generation_cmd.extend(["--openai_base_url", str(gen["openai_base_url"])])
+    if gen["openai_organization"]:
+        generation_cmd.extend(["--openai_organization", str(gen["openai_organization"])])
+    if gen["openai_enable_thinking"] is not None:
+        generation_cmd.extend(["--openai_enable_thinking", str(gen["openai_enable_thinking"]).lower()])
+    if gen["openai_extra_body_json"] not in (None, ""):
+        generation_cmd.extend(["--openai_extra_body_json", str(gen["openai_extra_body_json"])])
+    if gen["gen_length"] is not None:
+        generation_cmd.extend(["--gen_length", str(gen["gen_length"])])
+
+    steps = [
+        {"name": "retrieval", "cmd": retrieval_cmd, "cwd": str(repo_root)},
+        {"name": "generation", "cmd": generation_cmd, "cwd": str(repo_root)},
+    ]
+
+    if bool(cfg.get("run_eval", global_cfg.get("run_eval", False))):
+        eval_model = cfg.get("eval_model", global_cfg.get("eval_model", "gpt-4o-mini"))
+        ref_file = Path(cfg.get("ref_json", global_cfg.get("ref_json", in_file))).resolve()
+        eval_cmd = [
+            python_bin,
+            "-m",
+            "src.evaluation.evaluate_qa",
+            str(eval_model),
+            gen["out_file"],
+            str(ref_file),
+        ]
+        steps.append({"name": "eval", "cmd": eval_cmd, "cwd": str(repo_root)})
+
+    metadata = {
+        "run_dir": str(run_dir),
+        "in_file": str(in_file),
+        "retrieval_output": retrieval_out,
+        "generation_output": gen["out_file"],
+        "temporal_profile": temporal_enabled,
+        "cold_start_router": cold_enabled,
+        "explicit_profile": explicit_enabled,
+    }
+    return steps, metadata
+
+
+def build_pbr_pipeline_steps(repo_root, python_bin, global_cfg, exp):
+    defaults = {
+        "model_type": "PBR",
+        "temporal_profile": False,
+        "cold_start_router": False,
+        "explicit_profile": False,
+    }
+    return build_pbr_family_steps(repo_root, python_bin, global_cfg, exp, defaults)
+
+
+def build_dua_rag_steps(repo_root, python_bin, global_cfg, exp):
+    defaults = {
+        "model_type": "PBR++",
+        "temporal_profile": True,
+        "cold_start_router": True,
+        "explicit_profile": True,
+    }
+    return build_pbr_family_steps(repo_root, python_bin, global_cfg, exp, defaults)
+
 def build_custom_steps(repo_root, python_bin, global_cfg, exp):
     exp_name = exp["name"]
     cfg = exp.get("args", {})
@@ -573,6 +904,8 @@ def main():
     builders = {
         "naive_rag": build_naive_rag_steps,
         "history_rag": build_history_rag_steps,
+        "pbr_pipeline": build_pbr_pipeline_steps,
+        "dua_rag": build_dua_rag_steps,
         "llm_gt_baseline": build_llm_gt_steps,
         "pgraphrag_official": build_pgraphrag_steps,
         "afce_official": build_afce_steps,
@@ -620,5 +953,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-

@@ -1,0 +1,55 @@
+{
+  "global": {
+    "run_root": "./experiments/runs/official_unified_eval",
+    "eval_model": "gpt-4o-mini",
+    "unified_eval": true,
+    "ref_id_field": "question_id",
+    "ref_match_field": "question_id",
+    "pgraphrag_repo": "./third_party_baselines/PGraphRAG",
+    "afce_repo": "./third_party_baselines/AP-Bots",
+    "lightrag_repo": "./third_party_baselines/LightRAG"
+  },
+  "experiments": [
+    {
+      "name": "pgraphrag_with_unified_eval",
+      "method": "pgraphrag_official",
+      "args": {
+        "input": "./third_party_baselines/PGraphRAG/data_rank/amazon_rank/RANKING-amazon_dev_reviewText_bm25.json",
+        "model": "gpt",
+        "mode": ["both"],
+        "k": [2],
+        "ref_json": "./data/longmemeval_data/longmemeval_s_cleaned.json",
+        "adapter_pred_file": "",
+        "unified_eval": false
+      }
+    },
+    {
+      "name": "afce_with_unified_eval",
+      "method": "afce_official",
+      "args": {
+        "dataset": "lamp_4_dev_user",
+        "top_k": 5,
+        "retriever": "contriever",
+        "features": ["WF", "DPF"],
+        "counter_examples": 3,
+        "repetition_step": 1,
+        "prompt_style": "regular",
+        "ref_json": "./data/lamp/lamp4_dev_ref.json",
+        "id_map_json": "./data/lamp/lamp4_id_map.json",
+        "unified_eval": false
+      }
+    },
+    {
+      "name": "lightrag_with_unified_eval",
+      "method": "lightrag_official",
+      "args": {
+        "entry_script": "examples/lightrag_openai_demo.py",
+        "adapter_pred_file": "./outputs/lightrag_predictions.jsonl",
+        "ref_json": "./data/longmemeval_data/longmemeval_s_cleaned.json",
+        "id_field": "question_id",
+        "hyp_field": "answer",
+        "unified_eval": false
+      }
+    }
+  ]
+}

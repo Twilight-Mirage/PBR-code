@@ -1,0 +1,131 @@
+{
+  "global": {
+    "run_root": "./experiments/runs/chapter4/main_table",
+    "data_type": "s",
+    "input_json": "./data/longmemeval_data/longmemeval_s_cleaned.json",
+    "ref_json": "./data/longmemeval_data/longmemeval_s_cleaned.json",
+    "run_eval": true,
+    "eval_model": "gpt-4o-mini",
+    "retriever": "flat-contriever",
+    "granularity": "session",
+    "retrieval_model_name": "multi-qa-MiniLM-L6-cos-v1",
+    "embedding_task": "auto",
+    "gen_model_name": "qwen3.5-flash",
+    "gen_model_alias": "qwen35-flash",
+    "openai_key_env": "OPENAI_API_KEY",
+    "openai_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "llm_api_key_env": "OPENAI_API_KEY",
+    "llm_model": "qwen3.5-flash",
+    "history_format": "json",
+    "retriever_type": "flat-session",
+    "topk_context": 10,
+    "k_seed": 10,
+    "top_k_retrieval": 10,
+    "useronly": "false",
+    "cot": "false",
+    "con": "false",
+    "merge_key_expansion_into_value": "none",
+    "pgraphrag_repo": "./third_party_baselines/PGraphRAG",
+    "afce_repo": "./third_party_baselines/AP-Bots",
+    "lightrag_repo": "./third_party_baselines/LightRAG"
+  },
+  "experiments": [
+    {
+      "name": "naive_rag_longmemeval",
+      "method": "naive_rag",
+      "args": {
+        "outfile_prefix": "naive_rag_longmemeval"
+      }
+    },
+    {
+      "name": "history_rag_longmemeval",
+      "method": "history_rag",
+      "args": {
+        "retriever_type": "orig-session"
+      }
+    },
+    {
+      "name": "pbr_longmemeval",
+      "method": "pbr_pipeline",
+      "args": {
+        "model_type": "PBR",
+        "temporal_profile": false,
+        "cold_start_router": false,
+        "explicit_profile": false
+      }
+    },
+    {
+      "name": "dua_rag_longmemeval",
+      "method": "dua_rag",
+      "args": {
+        "model_type": "PBR++",
+        "cold_start_prototype_bank": "./data/longmemeval_data/prototype_bank_longmemeval_s_cleaned.json",
+        "cold_start_gate": "exp",
+        "cold_start_tau": 2.0,
+        "cold_start_m0": 3,
+        "explicit_profile_mix": 0.25,
+        "explicit_feature_topk": 12,
+        "contrastive_examples_k": 2,
+        "enable_short_term_state": true,
+        "short_term_window": 3,
+        "short_term_query_mix": 0.4,
+        "user_state_seed_alpha": 0.15,
+        "user_state_rerank_alpha": 0.25,
+        "contrastive_online_alpha": 0.1
+      }
+    },
+    {
+      "name": "llmgt_oracle_longmemeval",
+      "method": "llm_gt_baseline",
+      "args": {
+        "dataset_name": "LongMemEval",
+        "evidence_mode": "oracle",
+        "granularity": "session",
+        "oracle_sanity_check": true
+      }
+    },
+    {
+      "name": "pgraphrag_official_main",
+      "method": "pgraphrag_official",
+      "args": {
+        "input": "./third_party_baselines/PGraphRAG/data_rank/amazon_rank/RANKING-amazon_dev_reviewText_bm25.json",
+        "model": "gpt",
+        "mode": ["both"],
+        "k": [2]
+      }
+    },
+    {
+      "name": "afce_official_lamp4_partial",
+      "method": "afce_official",
+      "args": {
+        "dataset": "lamp_4_dev_user",
+        "top_k": 5,
+        "retriever": "contriever",
+        "features": ["WF", "DPF"],
+        "counter_examples": 3,
+        "repetition_step": 1,
+        "prompt_style": "regular"
+      }
+    },
+    {
+      "name": "afce_official_lamp7_partial",
+      "method": "afce_official",
+      "args": {
+        "dataset": "lamp_7_dev_user",
+        "top_k": 5,
+        "retriever": "contriever",
+        "features": ["WF", "DPF"],
+        "counter_examples": 3,
+        "repetition_step": 1,
+        "prompt_style": "regular"
+      }
+    },
+    {
+      "name": "lightrag_official_openai_demo",
+      "method": "lightrag_official",
+      "args": {
+        "entry_script": "examples/lightrag_openai_demo.py"
+      }
+    }
+  ]
+}
