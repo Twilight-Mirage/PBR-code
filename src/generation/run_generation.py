@@ -17,12 +17,15 @@ def parse_args():
     parser.add_argument('--in_file', type=str, required=True)
     parser.add_argument('--out_dir', type=str, required=True)
     parser.add_argument('--out_file_suffix', type=str, default="")
+    parser.add_argument('--out_file', type=str, default="", help="Optional explicit output file path.")
         
     parser.add_argument('--model_name', type=str, required=True)
     parser.add_argument('--model_alias', type=str, required=True)
     parser.add_argument('--openai_base_url', type=str, default=None)
     parser.add_argument('--openai_key', type=str, required=True)
     parser.add_argument('--openai_organization', type=str, default=None)
+    parser.add_argument('--openai_enable_thinking', type=str, choices=['true', 'false'], default='false')
+    parser.add_argument('--openai_extra_body_json', type=str, default="")
 
     parser.add_argument('--retriever_type', type=str, required=True)
     parser.add_argument('--topk_context', type=int, required=True)
@@ -43,7 +46,23 @@ def check_args(args):
     print(args)
 
 
-def prepare_prompt(entry, retriever_type, topk_context: int, useronly: bool, history_format: str, cot: bool, tokenizer, tokenizer_backend, max_retrieval_length, merge_key_expansion_into_value, con=False, con_client=None, con_model=None):    
+def build_extra_body(enable_thinking: bool, extra_body_json: str):
+    body = {}
+    raw = (extra_body_json or "").strip()
+    if raw:
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid --openai_extra_body_json: {e}") from e
+        if not isinstance(parsed, dict):
+            raise ValueError("--openai_extra_body_json must decode to a JSON object.")
+        body.update(parsed)
+    if enable_thinking:
+        body["enable_thinking"] = True
+    return body
+
+
+def prepare_prompt(entry, retriever_type, topk_context: int, useronly: bool, history_format: str, cot: bool, tokenizer, tokenizer_backend, max_retrieval_length, merge_key_expansion_into_value, con=False, con_client=None, con_model=None, con_extra_body=None):    
     if retriever_type == 'no-retrieval':
         answer_prompt_template = '{}'
         if cot:
@@ -210,6 +229,8 @@ def prepare_prompt(entry, retriever_type, topk_context: int, useronly: bool, his
                 'temperature': 0,
                 'max_tokens': 500,
             }
+            if isinstance(con_extra_body, dict) and con_extra_body:
+                kwargs['extra_body'] = con_extra_body
             completion = chat_completions_with_backoff(con_client, **kwargs) 
             cur_note = completion.choices[0].message.content.strip()
             chunk_entry_con = {'session_summary': cur_note}
@@ -302,14 +323,21 @@ def main(args):
     except:
         in_data = [json.loads(line) for line in open(args.in_file).readlines()]
 
-    in_file_tmp = args.in_file.split('/')[-1]
-    if args.merge_key_expansion_into_value is not None and args.merge_key_expansion_into_value != 'none':
-        out_file = args.out_dir + '/' + in_file_tmp + '_testlog_top{}context_{}format_useronly{}_factexpansion{}_{}'.format(args.topk_context, args.history_format, args.useronly, args.merge_key_expansion_into_value, datetime.now().strftime("%Y%m%d-%H%M"))
+    if args.out_file and args.out_file.strip():
+        out_file = args.out_file.strip()
     else:
-        out_file = args.out_dir + '/' + in_file_tmp + '_testlog_top{}context_{}format_useronly{}_{}'.format(args.topk_context, args.history_format, args.useronly, datetime.now().strftime("%Y%m%d-%H%M"))
+        in_file_tmp = args.in_file.split('/')[-1]
+        if args.merge_key_expansion_into_value is not None and args.merge_key_expansion_into_value != 'none':
+            out_file = args.out_dir + '/' + in_file_tmp + '_testlog_top{}context_{}format_useronly{}_factexpansion{}_{}'.format(args.topk_context, args.history_format, args.useronly, args.merge_key_expansion_into_value, datetime.now().strftime("%Y%m%d-%H%M"))
+        else:
+            out_file = args.out_dir + '/' + in_file_tmp + '_testlog_top{}context_{}format_useronly{}_{}'.format(args.topk_context, args.history_format, args.useronly, datetime.now().strftime("%Y%m%d-%H%M"))
     if args.out_file_suffix.strip() != "":
         out_file += args.out_file_suffix
     out_f = open(out_file, 'w')
+    extra_body = build_extra_body(
+        enable_thinking=(args.openai_enable_thinking == 'true'),
+        extra_body_json=args.openai_extra_body_json,
+    )
 
     # inference
     model2maxlength = {
@@ -325,8 +353,9 @@ def main(args):
         'mistral-7b-instruct-v0.3': 32000,
         'In2Training/FILM-7B': 32000,
     }
-    model_max_length = model2maxlength[args.model_name]
-    if 'gpt-4' in args.model_name.lower()  or 'gpt-3.5' in args.model_name.lower():
+    model_name_lc = args.model_name.lower()
+    model_max_length = model2maxlength.get(args.model_name, 128000)
+    if ('gpt-4' in model_name_lc) or ('gpt-3.5' in model_name_lc) or ('qwen' in model_name_lc):
         tokenizer = tiktoken.get_encoding('o200k_base')
         tokenizer_backend = 'openai'
     else:
@@ -343,11 +372,11 @@ def main(args):
         max_retrieval_length = model_max_length - gen_length - 1000
 
         if args.con == 'true':
-            prompt = prepare_prompt(entry, args.retriever_type, args.topk_context, args.useronly=='true',
+                prompt = prepare_prompt(entry, args.retriever_type, args.topk_context, args.useronly=='true',
                                     args.history_format, args.cot=='true', 
                                     tokenizer=tokenizer, tokenizer_backend=tokenizer_backend, max_retrieval_length=max_retrieval_length,
                                     merge_key_expansion_into_value=args.merge_key_expansion_into_value,
-                                    con=True, con_client=client, con_model=args.model_name)
+                                    con=True, con_client=client, con_model=args.model_name, con_extra_body=extra_body)
         else:
             prompt = prepare_prompt(entry, args.retriever_type, args.topk_context, args.useronly=='true',
                                     args.history_format, args.cot=='true', 
@@ -366,6 +395,8 @@ def main(args):
                 'temperature': 0,
                 'max_tokens': gen_length,
             }
+            if extra_body:
+                kwargs['extra_body'] = extra_body
             completion = chat_completions_with_backoff(client,**kwargs) 
             answer = completion.choices[0].message.content.strip()
 

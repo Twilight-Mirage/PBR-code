@@ -5,9 +5,15 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn.functional as F
-from sentence_transformers import SentenceTransformer
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
+
+from src.common.project_runtime import (
+    load_sentence_transformer,
+    resolve_default_embedding_task,
+    resolve_default_retrieval_model_name,
+    resolve_embedding_task,
+)
 
 from src.retrieval.explicit_user_encoder import (
     ExplicitUserProjector,
@@ -100,8 +106,14 @@ def main():
     parser.add_argument(
         "--retrieval_model_name",
         type=str,
-        default="multi-qa-MiniLM-L6-cos-v1",
+        default=resolve_default_retrieval_model_name(),
         help="Base embedding model.",
+    )
+    parser.add_argument(
+        "--embedding_task",
+        type=str,
+        default=resolve_default_embedding_task(),
+        help="Embedding task for multi-task models. auto infers retrieval for Jina v5.",
     )
     parser.add_argument("--max_triplets", type=int, default=0, help="Optional cap on triplets.")
     parser.add_argument("--hidden_dim", type=int, default=512, help="Projector hidden dim.")
@@ -130,7 +142,14 @@ def main():
     positives_text = [str(x["positive_text"]) for x in rows]
     negatives_text = [str(x["negative_text"]) for x in rows]
 
-    base_model = SentenceTransformer(args.retrieval_model_name, trust_remote_code=True)
+    effective_embedding_task = resolve_embedding_task(args.retrieval_model_name, args.embedding_task)
+    if effective_embedding_task:
+        print(f"embedding_task: {effective_embedding_task}")
+    base_model = load_sentence_transformer(
+        args.retrieval_model_name,
+        embedding_task=args.embedding_task,
+        trust_remote_code=True,
+    )
     text_table = dedup_encode_texts(base_model, anchors_text + positives_text + negatives_text)
 
     anchors = np.asarray([text_table[t] for t in anchors_text], dtype=np.float32)
@@ -207,6 +226,7 @@ def main():
                 dropout=args.dropout,
                 meta={
                     "retrieval_model_name": args.retrieval_model_name,
+                    "embedding_task": effective_embedding_task or "",
                     "triplets_jsonl": str(args.triplets_jsonl),
                     "num_triplets": int(n),
                     "num_train": int(len(train_idx)),
@@ -220,6 +240,7 @@ def main():
 
     summary = {
         "retrieval_model_name": args.retrieval_model_name,
+        "embedding_task": effective_embedding_task or "",
         "triplets_jsonl": str(args.triplets_jsonl),
         "output_ckpt": str(args.output_ckpt),
         "num_triplets": int(n),

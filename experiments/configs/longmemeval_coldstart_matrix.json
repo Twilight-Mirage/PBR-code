@@ -1,7 +1,6 @@
 {
   "global": {
     "data_type": "s",
-    "retrieval_model_name": "multi-qa-MiniLM-L6-cos-v1",
     "k_seed": 10,
     "top_k_retrieval": 10,
     "seed_candidate_multiplier": 4,

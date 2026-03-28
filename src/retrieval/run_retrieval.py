@@ -355,10 +355,17 @@ def main(args):
     
     # multiprocessing
     num_processes = torch.cuda.device_count()
+    if num_processes <= 0:
+        num_processes = 1
     if 'bm25' in args.retriever:
-        num_processes = 10
+        num_processes = min(10, len(in_data)) if len(in_data) > 0 else 1
+    num_processes = max(1, min(num_processes, len(in_data))) if len(in_data) > 0 else 1
+
     print('Setting num processes = {} with retriever {}'.format(num_processes, args.retriever))
-    mp.set_start_method('spawn')
+    try:
+        mp.set_start_method('spawn')
+    except RuntimeError:
+        pass
     pool = mp.Pool(num_processes)
     worker = partial(batch_get_retrieved_context_and_eval, args=args, index_expansion_result_cache=index_expansion_result_cache)
 
@@ -420,3 +427,4 @@ def main(args):
 if __name__ == '__main__':
     args = parse_args()
     main(args)
+

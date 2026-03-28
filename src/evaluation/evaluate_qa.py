@@ -7,6 +7,7 @@ import openai
 from openai import OpenAI
 import numpy as np
 
+from src.common.project_runtime import resolve_api_key, resolve_base_url, resolve_organization
 
 model_zoo = {
     'llama-3.1-70b-instruct': ('meta-llama/Meta-Llama-3.1-70B-Instruct', 'local'),
@@ -36,7 +37,8 @@ def get_anscheck_prompt(task, question, answer, response, abstention=False):
             template = "I will give you a question, a rubric for desired personalized response, and a response from a model. Please answer yes if the response satisfies the desired response. Otherwise, answer no. The model does not need to reflect all the points in the rubric. The response is correct as long as it recalls and utilizes the user's personal information correctly.\n\nQuestion: {}\n\nRubric: {}\n\nModel Response: {}\n\nIs the model response correct? Answer yes or no only."
             prompt = template.format(question, answer, response)
         else:
-            raise NotImplementedError
+            template = "I will give you a question, a reference answer, and a response from a model. Please answer yes if the model response is correct or semantically equivalent to the reference answer. Otherwise, answer no.\n\nQuestion: {}\n\nReference Answer: {}\n\nModel Response: {}\n\nIs the model response correct? Answer yes or no only."
+            prompt = template.format(question, answer, response)
     else:
         template = "I will give you an unanswerable question, an explanation, and a response from a model. Please answer yes if the model correctly identifies the question as unanswerable. The model could say that the information is incomplete, or some other information is given but the asked information is not.\n\nQuestion: {}\n\nExplanation: {}\n\nModel Response: {}\n\nDoes the model correctly identify the question as unanswerable? Answer yes or no only."
         prompt = template.format(question, answer, response) 
@@ -60,9 +62,10 @@ if __name__ == '__main__':
         exit()
     metric_model, metric_model_source = model_zoo[metric_model_short]
     if metric_model_source == 'openai':
-        openai.organization = os.getenv('OPENAI_ORGANIZATION')
-        openai_api_key = os.getenv('OPENAI_API_KEY')
-        openai_api_base = None
+        org_value = resolve_organization(env_name='OPENAI_ORGANIZATION')
+        openai.organization = org_value if org_value else None
+        openai_api_key = resolve_api_key(env_name='OPENAI_API_KEY')
+        openai_api_base = resolve_base_url(env_name='OPENAI_BASE_URL')
     else:
         openai_api_key = "EMPTY"
         openai_api_base = "http://localhost:8001/v1"

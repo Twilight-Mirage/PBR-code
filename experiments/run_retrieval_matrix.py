@@ -4,6 +4,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from src.common.project_runtime import resolve_default_embedding_task, resolve_default_retrieval_model_name
+
 
 def add_cli_arg(cmd, key, value):
     flag = f"--{key}"
@@ -19,14 +21,26 @@ def add_cli_arg(cmd, key, value):
 def build_command(python_bin, repo_root, global_cfg, exp_cfg):
     cmd = [
         python_bin,
-        str(repo_root / "src" / "retrieval" / "retrieval_PBR.py"),
+        "-m",
+        "src.retrieval.retrieval_PBR",
     ]
+    exp_args = exp_cfg.get("args", {})
+    retrieval_model_name = exp_args.get(
+        "retrieval_model_name",
+        global_cfg.get("retrieval_model_name", resolve_default_retrieval_model_name()),
+    )
+    embedding_task = exp_args.get(
+        "embedding_task",
+        global_cfg.get("embedding_task", resolve_default_embedding_task()),
+    )
+
     add_cli_arg(cmd, "model_type", exp_cfg.get("model_type", "PBR"))
     add_cli_arg(cmd, "data_type", global_cfg.get("data_type", "s"))
-    add_cli_arg(cmd, "retrieval_model_name", global_cfg.get("retrieval_model_name", "multi-qa-MiniLM-L6-cos-v1"))
+    add_cli_arg(cmd, "retrieval_model_name", retrieval_model_name)
+    add_cli_arg(cmd, "embedding_task", embedding_task)
 
     for gk, gv in global_cfg.items():
-        if gk in {"data_type", "retrieval_model_name"}:
+        if gk in {"data_type", "retrieval_model_name", "embedding_task"}:
             continue
         add_cli_arg(cmd, gk, gv)
 
@@ -42,7 +56,9 @@ def build_command(python_bin, repo_root, global_cfg, exp_cfg):
         save_suffix = f"_exp_{exp_cfg['name']}"
     add_cli_arg(cmd, "save_suffix", save_suffix)
 
-    for k, v in exp_cfg.get("args", {}).items():
+    for k, v in exp_args.items():
+        if k in {"retrieval_model_name", "embedding_task"}:
+            continue
         add_cli_arg(cmd, k, v)
     return cmd
 

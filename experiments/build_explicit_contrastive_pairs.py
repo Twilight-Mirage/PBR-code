@@ -4,9 +4,10 @@ from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
-from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 from tqdm import tqdm
+
+from src.common.project_runtime import (load_sentence_transformer, resolve_default_embedding_task, resolve_default_retrieval_model_name, resolve_embedding_task)
 
 
 def l2_normalize(v):
@@ -67,8 +68,14 @@ def main():
     parser.add_argument(
         "--retrieval_model_name",
         type=str,
-        default="multi-qa-MiniLM-L6-cos-v1",
+        default=resolve_default_retrieval_model_name(),
         help="Embedding model used for hard-negative mining.",
+    )
+    parser.add_argument(
+        "--embedding_task",
+        type=str,
+        default=resolve_default_embedding_task(),
+        help="Embedding task for multi-task models. auto infers retrieval for Jina v5.",
     )
     parser.add_argument("--max_pairs_per_user", type=int, default=12, help="Max (anchor,pos,neg) triplets per user.")
     parser.add_argument(
@@ -113,7 +120,14 @@ def main():
     if len(user_ids) < 2:
         raise ValueError("Need at least 2 users (each with >=2 sessions) to build contrastive pairs.")
 
-    model = SentenceTransformer(args.retrieval_model_name, trust_remote_code=True)
+    effective_embedding_task = resolve_embedding_task(args.retrieval_model_name, args.embedding_task)
+    if effective_embedding_task:
+        print(f"embedding_task: {effective_embedding_task}")
+    model = load_sentence_transformer(
+        args.retrieval_model_name,
+        embedding_task=args.embedding_task,
+        trust_remote_code=True,
+    )
     emb = model.encode(flat_texts, convert_to_numpy=True)
     emb = np.asarray([l2_normalize(x) for x in emb], dtype=np.float32)
 
@@ -176,3 +190,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

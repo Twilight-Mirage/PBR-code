@@ -4,13 +4,13 @@ This is repository provides the official implementation of the `AAAI 2026 Oral` 
 
 **Personalize Before Retrieve: LLM-based Personalized Query Expansion for User-Centric Retrieval**  
 
-![鐠佺儤鏋冮崶鍓у](./assets/main_framework.png)
+![Main Framework](./assets/main_framework.png)
 
 ---
 
-## 棣冨皞 Overview
+## Overview
 
-This project implements **PBR (Personalize Before Retrieve)** 閳?a novel framework for personalized query expansion in Retrieval-Augmented Generation (RAG) systems. Unlike traditional expansion methods, PBR adapts to **individual user styles and corpus structures** before retrieval.
+This project implements **PBR (Personalize Before Retrieve)** 闂?a novel framework for personalized query expansion in Retrieval-Augmented Generation (RAG) systems. Unlike traditional expansion methods, PBR adapts to **individual user styles and corpus structures** before retrieval.
 
 PBR consists of two core modules:
 
@@ -21,16 +21,16 @@ We evaluate PBR on two personalized benchmarks: **PersonaBench** and **LongMemEv
 
 ---
 
-## 棣冾潵 Key Features
+## Key Features
 
-- 棣冩敚 **LLM-based query expansion** with style-aware feedback and reasoning simulation
-- 棣冃?**Graph-enhanced memory retrieval** via PageRank and embedding fusion
-- 棣冃?Full evaluation pipeline with ablation, baselines, and parameter sensitivity
-- 棣冩惓 Compatible with retrievers like `multi-qa-MiniLM`, `all-MiniLM`, `bge-base-en`
+- **LLM-based query expansion** with style-aware feedback and reasoning simulation
+- **Graph-enhanced memory retrieval** via PageRank and embedding fusion
+- **Full evaluation pipeline with ablation, baselines, and parameter sensitivity
+- **Compatible with retrievers like `multi-qa-MiniLM`, `all-MiniLM`, `bge-base-en`
 
 ---
 
-## 棣冩憹 Installation
+## 濡絽鍟幉?Installation
 
 Install required packages:
 
@@ -38,17 +38,21 @@ Install required packages:
 pip install -r requirements.txt
 ```
 
-You閳ユ獟l need:
-	閳?sentence-transformers, faiss-cpu
-	閳?openai, cvxpy, scikit-learn, ot, numpy, scipy
-	閳?a valid OpenAI API Key (for gpt-4o-mini)
+Project-level runtime settings are in `project_settings.py` (API key/base URL/default LongMemEval path).
+Edit this file once if you prefer not to set system environment variables.
 
 
-## 棣冩憥 Usage - LongMemEval
+You need:
+	**sentence-transformers, faiss-cpu
+	**openai, cvxpy, scikit-learn, ot, numpy, scipy
+	a valid OpenAI API Key (for gpt-4o-mini)
+
+
+## Usage - LongMemEval
 ### 1. download data
 you need to download LongMemEval data to this dictionary form https://github.com/xiaowu0162/LongMemEval. 
 
-For example: "./data/longmemeval_data/longmemeval_s.json".
+For example: "./data/longmemeval_data/longmemeval_s_cleaned.json".
 
 ### 2. run the code
 ```bash
@@ -59,7 +63,7 @@ python -u ./src/retrieval/retrieval_PBR.py \
 
 ```
 
-## 棣冩憥 Usage - personabench
+## Usage - personabench
 ### 1. run the code
 ```bash
 cd ./personabench_main_PBR
@@ -92,7 +96,7 @@ CUDA_VISIBLE_DEVICES="0" python scripts/evaluation/eval_rag_PBR.py \
 
 ```
 
-### 棣冩憠 Citation
+### Citation
 If you find this work helpful, please cite:
 ```bibtex
 @article{zhang2025personalize,
@@ -145,8 +149,8 @@ The retrieval pipeline now supports supervised + unsupervised cold-start routing
 
 ```bash
 python experiments/build_coldstart_prototype_bank.py \
-  --input_json data/longmemeval_data/longmemeval_s.json \
-  --output_json data/longmemeval_data/prototype_bank_longmemeval_s.json \
+  --input_json data/longmemeval_data/longmemeval_s_cleaned.json \
+  --output_json data/longmemeval_data/prototype_bank_longmemeval_s_cleaned.json \
   --retrieval_model_name multi-qa-MiniLM-L6-cos-v1 \
   --num_clusters 8 \
   --label_keys department,role,team
@@ -158,7 +162,7 @@ python experiments/build_coldstart_prototype_bank.py \
 python -u ./src/retrieval/retrieval_PBR.py \
   --model_type="PBR" \
   --cold_start_router \
-  --cold_start_prototype_bank="./data/longmemeval_data/prototype_bank_longmemeval_s.json" \
+  --cold_start_prototype_bank="./data/longmemeval_data/prototype_bank_longmemeval_s_cleaned.json" \
   --cold_start_m0=3 \
   --cold_start_tau=2.0 \
   --cold_start_supervised_weight=0.6 \
@@ -187,4 +191,5 @@ python experiments/summarize_retrieval_results.py --glob "data/longmemeval_data/
 
 
 For project/module layout dedicated to fast ablations, see docs/personalized_rag_experiment_structure.md.
+
 

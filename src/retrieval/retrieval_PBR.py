@@ -3,17 +3,20 @@ import asyncio
 import json
 import time
 from datetime import datetime
+from pathlib import Path
 
 import faiss
 import numpy as np
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components
 from scipy.special import softmax
-from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 from tqdm import tqdm
 
-from async_llm import run_async
+try:
+    from src.retrieval.async_llm import run_async
+except ModuleNotFoundError:
+    from async_llm import run_async
 from src.retrieval.cold_start_router import ColdStartRouter, l2_normalize, load_prototype_bank
 from src.retrieval.eval_utils import evaluate_retrieval
 from src.retrieval.explicit_profile_utils import (
@@ -23,6 +26,7 @@ from src.retrieval.explicit_profile_utils import (
     select_contrastive_examples,
 )
 from src.retrieval.explicit_user_encoder import ExplicitUserEncoderAdapter
+from src.common.project_runtime import (default_longmemeval_input, load_sentence_transformer, resolve_api_key, resolve_base_url, resolve_default_embedding_task, resolve_default_retrieval_model_name, resolve_embedding_task)
 
 
 def load_json_res(res):
@@ -195,16 +199,27 @@ class RAGRetriever:
         self.temporal_graph_decay = float(temporal_cfg.get("temporal_graph_decay", 0.02))
         self.short_term_blend = float(temporal_cfg.get("short_term_blend", 0.5))
         self.seed_candidate_multiplier = int(temporal_cfg.get("seed_candidate_multiplier", 4))
+        self.temporal_strength_base = float(temporal_cfg.get("temporal_strength_base", 7.0))
+        self.temporal_strength_scale = float(temporal_cfg.get("temporal_strength_scale", 21.0))
+        self.temporal_strength_min = float(temporal_cfg.get("temporal_strength_min", 1.0))
+        self.temporal_strength_max = float(temporal_cfg.get("temporal_strength_max", 60.0))
+        self.temporal_forgetting_eps = float(temporal_cfg.get("temporal_forgetting_eps", 1e-3))
+        self.temporal_reinforce_alpha = float(temporal_cfg.get("temporal_reinforce_alpha", 5.0))
+        self.temporal_reinforce_clip = float(temporal_cfg.get("temporal_reinforce_clip", 10.0))
 
         self.session_datetimes = []
         self.session_ordinals = None
         self.session_utilities = None
         self.recency_weights = None
         self.util_weights = None
+        self.memory_strengths = None
+        self.reinforcement_deltas = None
         self.temporal_weights = None
         self.user_profile_embedding = None
         self.short_term_center = None
         self.long_term_center = None
+        self.history_session_has_user = []
+        self.valid_history_size = 0
 
         coldstart_cfg = coldstart_cfg or {}
         self.cold_router = ColdStartRouter(coldstart_cfg)
@@ -263,6 +278,8 @@ class RAGRetriever:
         if n == 0:
             self.recency_weights = np.array([], dtype=np.float32)
             self.util_weights = np.array([], dtype=np.float32)
+            self.memory_strengths = np.array([], dtype=np.float32)
+            self.reinforcement_deltas = np.array([], dtype=np.float32)
             self.temporal_weights = np.array([], dtype=np.float32)
             return
 
@@ -289,17 +306,21 @@ class RAGRetriever:
 
         ages = np.array(ages, dtype=np.float32)
         self.recency_weights = np.exp(-self.temporal_decay_lambda * ages)
+        if self.memory_strengths is None:
+            base_strength = np.full(n, self.temporal_strength_base, dtype=np.float32)
+            self.memory_strengths = np.clip(base_strength, self.temporal_strength_min, self.temporal_strength_max)
 
-        self.util_weights = 1.0 / (1.0 + np.exp(-self.temporal_util_alpha * (self.session_utilities - self.temporal_util_bias)))
-
-        temporal = self.recency_weights * self.util_weights
-        temporal = np.clip(temporal, 1e-6, None)
+        strengths = np.clip(self.memory_strengths, self.temporal_strength_min, self.temporal_strength_max)
+        forgetting_logits = -ages / (strengths + self.temporal_forgetting_eps)
+        forgetting_logits = forgetting_logits - np.max(forgetting_logits)
+        temporal = np.exp(forgetting_logits)
+        temporal = np.clip(temporal, 1e-8, None)
         self.temporal_weights = temporal / (temporal.sum() + 1e-8)
 
     def query_seed_weighted(self, questions, top_k=10):
         """
-        P-PRF++ seed retrieval following Algorithm A:
-        score_i = sim(q, doc_i) * exp(-lambda * age_i) * sigmoid(alpha * util_i)
+        Seed retrieval with temporal/persona-aware reweighting.
+        Temporal weights follow forgetting-curve style alpha_i^t.
         """
         if self.index is None:
             raise ValueError("Index has not been built. Please call build_index() first.")
@@ -413,6 +434,8 @@ class RAGRetriever:
         utilities = []
         self.history_plain_texts = []
         self.history_turns_per_session = []
+        self.history_session_has_user = []
+        self.valid_history_size = 0
 
         for cur_sess_id, sess_entry, ts in zip(
             test_item["haystack_session_ids"],
@@ -431,6 +454,10 @@ class RAGRetriever:
             self.history_plain_texts.append(" ".join(user_data))
             self.history_turns_per_session.append(user_data)
             self.session_datetimes.append(safe_parse_datetime(ts))
+            has_user_history = len(user_data) > 0
+            self.history_session_has_user.append(has_user_history)
+            if has_user_history:
+                self.valid_history_size += 1
 
             util = utility_map.get(cur_sess_id) if isinstance(utility_map, dict) else None
             if util is None:
@@ -450,20 +477,59 @@ class RAGRetriever:
         self.chunks = corpus
         self.segment_ids = np.array(corpus_ids)
         self.session_utilities = np.array(utilities, dtype=np.float32)
+        query_embedding = self.retriever_model.encode([test_item.get("question", "")], convert_to_numpy=True)[0]
+
+        util_gate = 1.0 / (1.0 + np.exp(-self.temporal_util_alpha * (self.session_utilities - self.temporal_util_bias)))
+        util_gate = np.asarray(util_gate, dtype=np.float32)
+        self.util_weights = util_gate
+
+        base_strengths = self.temporal_strength_base + self.temporal_strength_scale * util_gate
+        auto_reinforce = np.maximum(
+            0.0,
+            cosine_similarity(embeddings, query_embedding[None, :]).squeeze(),
+        )
+        auto_reinforce = np.atleast_1d(auto_reinforce).astype(np.float32)
+        auto_reinforce = np.clip(
+            auto_reinforce * self.temporal_reinforce_alpha,
+            0.0,
+            self.temporal_reinforce_clip,
+        )
+        manual_reinforce = np.zeros_like(auto_reinforce, dtype=np.float32)
+        raw_manual_reinforce = test_item.get("session_reinforcements", {})
+        if isinstance(raw_manual_reinforce, dict):
+            sid_to_idx = {str(x): i for i, x in enumerate(corpus_ids)}
+            for sid, delta in raw_manual_reinforce.items():
+                if str(sid) in sid_to_idx:
+                    try:
+                        manual_reinforce[sid_to_idx[str(sid)]] = float(delta)
+                    except (TypeError, ValueError):
+                        continue
+        self.reinforcement_deltas = np.asarray(auto_reinforce + manual_reinforce, dtype=np.float32)
+        self.memory_strengths = np.clip(
+            base_strengths + self.reinforcement_deltas,
+            self.temporal_strength_min,
+            self.temporal_strength_max,
+        ).astype(np.float32)
+
         self._compute_temporal_weights(test_item.get("question_date"))
 
-        if self.enable_temporal_profile:
-            weighted_profile = self.temporal_weights / (self.temporal_weights.sum() + 1e-8)
-            base_profile_embedding = np.dot(weighted_profile, embeddings)
+        history_mask = np.asarray(self.history_session_has_user, dtype=bool)
+        if np.any(history_mask):
+            history_embeddings = embeddings[history_mask]
+            if self.enable_temporal_profile:
+                hist_weights = self.temporal_weights[history_mask]
+                hist_weights = hist_weights / (hist_weights.sum() + 1e-8)
+                base_profile_embedding = np.dot(hist_weights, history_embeddings)
+            else:
+                base_profile_embedding = np.mean(history_embeddings, axis=0)
         else:
-            base_profile_embedding = np.mean(embeddings, axis=0)
+            base_profile_embedding = None
 
-        query_embedding = self.retriever_model.encode([test_item.get("question", "")], convert_to_numpy=True)[0]
         self.user_profile_embedding, self.cold_start_route_info = self.cold_router.route(
             test_item=test_item,
             query_embedding=query_embedding,
             user_history_embedding=base_profile_embedding,
-            user_history_size=len(corpus),
+            user_history_size=self.valid_history_size,
         )
         self.user_profile_embedding = l2_normalize(self.user_profile_embedding)
 
@@ -668,7 +734,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_type", type=str, default="PBR", help="Which model to use.")
     parser.add_argument("--data_type", type=str, default="s", help="Which model to use.")
-    parser.add_argument("--retrieval_model_name", type=str, default="multi-qa-MiniLM-L6-cos-v1", help="Which model to use.")
+    parser.add_argument("--retrieval_model_name", type=str, default=resolve_default_retrieval_model_name(), help="Embedding model name/path.")
+    parser.add_argument(
+        "--embedding_task",
+        type=str,
+        default=resolve_default_embedding_task(),
+        help="Embedding task for multi-task models (e.g., retrieval/text-matching/clustering/classification). auto infers retrieval for Jina v5.",
+    )
 
     parser.add_argument("--temporal_profile", action="store_true", help="Enable temporal-evolving profile for PBR.")
     parser.add_argument("--temporal_decay_lambda", type=float, default=0.05, help="Lambda in exp(-lambda * age_days).")
@@ -678,11 +750,75 @@ if __name__ == "__main__":
     parser.add_argument("--temporal_graph_decay", type=float, default=0.02, help="Temporal proximity decay in graph edges.")
     parser.add_argument("--short_term_blend", type=float, default=0.5, help="Blend ratio of short-term and long-term anchor.")
     parser.add_argument("--seed_candidate_multiplier", type=int, default=4, help="Over-fetch multiplier before temporal rerank.")
+    parser.add_argument(
+        "--temporal_strength_base",
+        type=float,
+        default=7.0,
+        help="Base memory-strength prior for forgetting curve.",
+    )
+    parser.add_argument(
+        "--temporal_strength_scale",
+        type=float,
+        default=21.0,
+        help="Utility-to-memory-strength scaling in forgetting curve.",
+    )
+    parser.add_argument(
+        "--temporal_strength_min",
+        type=float,
+        default=1.0,
+        help="Minimum memory strength in forgetting curve.",
+    )
+    parser.add_argument(
+        "--temporal_strength_max",
+        type=float,
+        default=60.0,
+        help="Maximum memory strength in forgetting curve.",
+    )
+    parser.add_argument(
+        "--temporal_forgetting_eps",
+        type=float,
+        default=1e-3,
+        help="Stability epsilon in forgetting-curve denominator.",
+    )
+    parser.add_argument(
+        "--temporal_reinforce_alpha",
+        type=float,
+        default=5.0,
+        help="Scale for automatic reinforcement delta from query-session similarity.",
+    )
+    parser.add_argument(
+        "--temporal_reinforce_clip",
+        type=float,
+        default=10.0,
+        help="Upper clip for reinforcement delta.",
+    )
 
     parser.add_argument("--cold_start_router", action="store_true", help="Enable cohort prototype router for cold-start users.")
     parser.add_argument("--cold_start_prototype_bank", type=str, default="", help="Path to prototype-bank json.")
-    parser.add_argument("--cold_start_m0", type=int, default=3, help="History-size threshold for switching to individual profile.")
-    parser.add_argument("--cold_start_tau", type=float, default=2.0, help="Blend scheduler tau in beta=1-exp(-m/tau).")
+    parser.add_argument(
+        "--cold_start_m0",
+        type=int,
+        default=3,
+        help="Deprecated compatibility arg (fallback for cold_start_k when not provided).",
+    )
+    parser.add_argument(
+        "--cold_start_tau",
+        type=float,
+        default=2.0,
+        help="Deprecated compatibility arg from exponential gate.",
+    )
+    parser.add_argument(
+        "--cold_start_k",
+        type=float,
+        default=3.0,
+        help="Linear gate threshold K in lambda=min(1, |H|/K).",
+    )
+    parser.add_argument(
+        "--cold_start_min_cluster_size",
+        type=int,
+        default=2,
+        help="Minimum unsupervised cluster size; smaller clusters fallback to broader prototypes.",
+    )
     parser.add_argument(
         "--cold_start_supervised_weight",
         type=float,
@@ -782,6 +918,26 @@ if __name__ == "__main__":
     parser.add_argument("--k_seed", type=int, default=10, help="K_seed for P-PRF++ seed history sampling.")
     parser.add_argument("--top_k_retrieval", type=int, default=10, help="Top-K used for final retrieval evaluation.")
     parser.add_argument("--save_suffix", type=str, default="", help="Optional suffix for output json file.")
+    parser.add_argument("--in_file", type=str, default="", help="Optional explicit input json path.")
+    parser.add_argument("--out_file", type=str, default="", help="Optional explicit output json path.")
+    parser.add_argument("--llm_model", type=str, default="gpt-4o-mini", help="LLM model used for fake-utterance/reason generation.")
+    parser.add_argument("--llm_api_key", type=str, default="", help="Optional API key override for async LLM calls.")
+    parser.add_argument(
+        "--llm_api_key_env",
+        type=str,
+        default="OPENAI_API_KEY",
+        help="Environment variable name for API key (falls back to project_settings.py).",
+    )
+    parser.add_argument("--llm_base_url", type=str, default="", help="Optional OpenAI-compatible base URL.")
+    parser.add_argument("--llm_max_tokens", type=int, default=512, help="Max tokens for async LLM responses.")
+    parser.add_argument("--llm_temperature", type=float, default=0.0, help="Sampling temperature for async LLM calls.")
+    parser.add_argument("--llm_enable_thinking", action="store_true", help="Enable provider-specific thinking mode when supported.")
+    parser.add_argument(
+        "--llm_extra_body_json",
+        type=str,
+        default="",
+        help="Optional JSON object merged into chat/completions payload (e.g., '{\"enable_thinking\":true}').",
+    )
 
     args = parser.parse_args()
     retriever_model_name = args.retrieval_model_name
@@ -799,6 +955,13 @@ if __name__ == "__main__":
         "temporal_graph_decay": args.temporal_graph_decay,
         "short_term_blend": args.short_term_blend,
         "seed_candidate_multiplier": args.seed_candidate_multiplier,
+        "temporal_strength_base": args.temporal_strength_base,
+        "temporal_strength_scale": args.temporal_strength_scale,
+        "temporal_strength_min": args.temporal_strength_min,
+        "temporal_strength_max": args.temporal_strength_max,
+        "temporal_forgetting_eps": args.temporal_forgetting_eps,
+        "temporal_reinforce_alpha": args.temporal_reinforce_alpha,
+        "temporal_reinforce_clip": args.temporal_reinforce_clip,
     }
     print("temporal_profile:", enable_temporal_profile)
 
@@ -844,9 +1007,11 @@ if __name__ == "__main__":
         "enable_cold_start_router": enable_cold_start_router,
         "cold_start_m0": args.cold_start_m0,
         "cold_start_tau": args.cold_start_tau,
+        "cold_start_k": args.cold_start_k,
         "cold_start_supervised_weight": args.cold_start_supervised_weight,
         "cold_start_prefer_supervised": args.cold_start_prefer_supervised,
         "cold_start_label_keys": cold_start_label_keys,
+        "cold_start_min_cluster_size": args.cold_start_min_cluster_size,
         "cold_start_anchor_mix": args.cold_start_anchor_mix,
         "cold_start_seed_profile_alpha": args.cold_start_seed_profile_alpha,
         "cold_start_rerank_alpha": args.cold_start_rerank_alpha,
@@ -858,8 +1023,12 @@ if __name__ == "__main__":
     print("cold_start_router:", enable_cold_start_router)
 
     data_type = args.data_type
-    in_file = f"./data/longmemeval_data/longmemeval_{data_type}.json"
-    print(in_file)
+    default_in_file = default_longmemeval_input(data_type=data_type)
+    in_file = args.in_file.strip() if args.in_file.strip() else default_in_file
+    in_path = Path(in_file).resolve()
+    if not in_path.exists():
+        raise FileNotFoundError(f"Input json not found: {in_path}")
+    print(in_path)
 
     tag_parts = ["PBR"]
     if enable_temporal_profile:
@@ -869,11 +1038,19 @@ if __name__ == "__main__":
     if enable_explicit_profile:
         tag_parts.append("explicit")
     model_tag = "_".join(tag_parts)
-    save_path = in_file.replace(".json", f"_{model_tag}{args.save_suffix}.json")
+    default_save_path = str(in_path.with_name(f"{in_path.stem}_{model_tag}{args.save_suffix}.json"))
+    save_path = args.out_file.strip() if args.out_file.strip() else default_save_path
     print(save_path)
 
-    in_data = json.load(open(in_file, encoding="utf-8"))
-    retriever_model = SentenceTransformer(retriever_model_name, trust_remote_code=True)
+    in_data = json.load(open(in_path, encoding="utf-8"))
+    effective_embedding_task = resolve_embedding_task(retriever_model_name, args.embedding_task)
+    if effective_embedding_task:
+        print(f"embedding_task: {effective_embedding_task}")
+    retriever_model = load_sentence_transformer(
+        retriever_model_name,
+        embedding_task=args.embedding_task,
+        trust_remote_code=True,
+    )
 
     results = []
     out_json = []
@@ -907,9 +1084,50 @@ if __name__ == "__main__":
         uttr_prompt.append(p_uttr_prompt)
         rea_prompt.append(p_rea_prompt)
 
+    llm_api_key = resolve_api_key(explicit_key=args.llm_api_key.strip(), env_name=args.llm_api_key_env)
+    llm_base_url = resolve_base_url(explicit_base=args.llm_base_url.strip(), env_name="OPENAI_BASE_URL")
+    if not llm_api_key:
+        raise ValueError(
+            f"Missing API key for async generation. Provide --llm_api_key, set env {args.llm_api_key_env}, "
+            f"or set OPENAI_API_KEY / DASHSCOPE_API_KEY in project_settings.py."
+        )
+    llm_extra_body = {}
+    if args.llm_extra_body_json.strip():
+        try:
+            parsed = json.loads(args.llm_extra_body_json)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"--llm_extra_body_json must be valid JSON object: {e}") from e
+        if not isinstance(parsed, dict):
+            raise ValueError("--llm_extra_body_json must decode to a JSON object.")
+        llm_extra_body.update(parsed)
+    if args.llm_enable_thinking:
+        llm_extra_body["enable_thinking"] = True
+
     print("begin_generation")
-    async_uttr_responses = asyncio.run(run_async(uttr_prompt, model="gpt-4o-mini"))
-    async_res_responses = asyncio.run(run_async(rea_prompt, model="gpt-4o-mini"))
+    async_uttr_responses = asyncio.run(
+        run_async(
+            uttr_prompt,
+            model=args.llm_model,
+            api_key=llm_api_key,
+            base_url=llm_base_url,
+            max_tokens=args.llm_max_tokens,
+            temperature=args.llm_temperature,
+            enable_thinking=args.llm_enable_thinking,
+            extra_body=llm_extra_body or None,
+        )
+    )
+    async_res_responses = asyncio.run(
+        run_async(
+            rea_prompt,
+            model=args.llm_model,
+            api_key=llm_api_key,
+            base_url=llm_base_url,
+            max_tokens=args.llm_max_tokens,
+            temperature=args.llm_temperature,
+            enable_thinking=args.llm_enable_thinking,
+            extra_body=llm_extra_body or None,
+        )
+    )
     print("end_generation")
 
     for idx, test_item in tqdm(enumerate(in_data)):
@@ -940,10 +1158,24 @@ if __name__ == "__main__":
         corpus_ids = [item for item in test_item["haystack_session_ids"]]
 
         ret_res = []
-        rankings = []
-        for res, ids in zip(retrieved_chunks, i_rankings[0].tolist()):
-            ret_res.append({"corpus_id": ids, "text": res})
-            rankings.append(ids)
+
+        # rankings 继续保留“索引位置”，因为 evaluate_retrieval() 需要它去索引 corpus_ids
+        rankings = i_rankings[0].tolist()
+
+        # 结果文件里的 corpus_id 应该写真实 session/document ID，而不是 FAISS 行号
+        ranked_corpus_ids = list(rankings_id)
+        for pos, (res, faiss_idx) in enumerate(zip(retrieved_chunks, rankings)):
+            if pos < len(ranked_corpus_ids):
+                real_corpus_id = ranked_corpus_ids[pos]
+            else:
+                real_corpus_id = corpus_ids[faiss_idx]  # 兜底
+            ret_res.append({
+                "corpus_id": real_corpus_id,
+                "faiss_index": faiss_idx,
+                "text": res,
+            })
+
+        assert len(rankings) == len(retrieved_chunks) == len(ranked_corpus_ids)
 
         cur_results = {
             "question_id": test_item["question_id"],
@@ -975,7 +1207,16 @@ if __name__ == "__main__":
                 cur_results["explicit_feature_profile"] = retriever.explicit_feature_profile
                 cur_results["contrastive_examples"] = retriever.contrastive_examples
 
-        correct_docs = list(set([doc_id for doc_id in corpus_ids if "answer" in doc_id]))
+        # 优先使用样本显式提供的正确 session/document ID
+        correct_docs = list(dict.fromkeys(test_item.get("answer_session_ids", [])))
+
+        # 兼容旧数据：如果 answer_session_ids 缺失，再退回旧的命名规则
+        if not correct_docs:
+            correct_docs = list(set([
+                doc_id for doc_id in corpus_ids
+                if "answer" in doc_id
+            ]))
+                
         for k in [1, 3, 5, 10]:
             recall_any, recall_all, ndcg_any = evaluate_retrieval(rankings, correct_docs, corpus_ids, k=k)
             cur_results["retrieval_results"]["metrics"]["session"].update(
@@ -1012,3 +1253,5 @@ if __name__ == "__main__":
 
     print(json.dumps(averaged_results))
     save_json(out_json, save_path)
+
+

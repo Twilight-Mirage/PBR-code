@@ -4,9 +4,10 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 import numpy as np
-from sentence_transformers import SentenceTransformer
 from sklearn.cluster import KMeans
 from tqdm import tqdm
+
+from src.common.project_runtime import (load_sentence_transformer, resolve_default_embedding_task, resolve_default_retrieval_model_name, resolve_embedding_task)
 
 
 def l2_normalize(vec):
@@ -158,8 +159,14 @@ def main():
     parser.add_argument(
         "--retrieval_model_name",
         type=str,
-        default="multi-qa-MiniLM-L6-cos-v1",
+        default=resolve_default_retrieval_model_name(),
         help="SentenceTransformer model used to encode user history.",
+    )
+    parser.add_argument(
+        "--embedding_task",
+        type=str,
+        default=resolve_default_embedding_task(),
+        help="Embedding task for multi-task models. auto infers retrieval for Jina v5.",
     )
     parser.add_argument("--label_keys", type=str, default="department,role,team", help="Comma-separated supervised label keys.")
     parser.add_argument("--num_clusters", type=int, default=8, help="Number of unsupervised user clusters.")
@@ -181,7 +188,14 @@ def main():
     if args.max_items > 0:
         data = data[: args.max_items]
 
-    model = SentenceTransformer(args.retrieval_model_name, trust_remote_code=True)
+    effective_embedding_task = resolve_embedding_task(args.retrieval_model_name, args.embedding_task)
+    if effective_embedding_task:
+        print(f"embedding_task: {effective_embedding_task}")
+    model = load_sentence_transformer(
+        args.retrieval_model_name,
+        embedding_task=args.embedding_task,
+        trust_remote_code=True,
+    )
     user_ids, X, user_labels = aggregate_user_vectors(data, model, label_keys)
 
     unsupervised_bank, user_to_cluster = build_unsupervised_bank(
@@ -202,6 +216,7 @@ def main():
         "meta": {
             "created_by": "experiments/build_coldstart_prototype_bank.py",
             "retrieval_model_name": args.retrieval_model_name,
+            "embedding_task": effective_embedding_task or "",
             "num_users": len(user_ids),
             "embedding_dim": int(X.shape[1]),
             "num_clusters": int(len(unsupervised_bank["centroids"])),
@@ -221,3 +236,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

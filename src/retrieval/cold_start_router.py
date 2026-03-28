@@ -35,11 +35,11 @@ class ColdStartRouter:
     def __init__(self, cfg=None):
         cfg = cfg or {}
         self.enable = bool(cfg.get("enable_cold_start_router", False))
-        self.m0 = int(cfg.get("cold_start_m0", 3))
-        self.tau = float(cfg.get("cold_start_tau", 2.0))
+        self.cold_start_k = float(cfg.get("cold_start_k", cfg.get("cold_start_m0", 3)))
         self.supervised_weight = float(cfg.get("cold_start_supervised_weight", 0.6))
         self.prefer_supervised = bool(cfg.get("cold_start_prefer_supervised", True))
         self.label_keys = list(cfg.get("cold_start_label_keys", ["department", "role", "team"]))
+        self.min_cluster_size = int(cfg.get("cold_start_min_cluster_size", 2))
         self.prototype_bank = cfg.get("cold_start_prototype_bank_obj")
         self.debug = bool(cfg.get("cold_start_debug", False))
 
@@ -82,15 +82,35 @@ class ColdStartRouter:
         if not centroids:
             return None, None
         centroids = np.asarray(centroids, dtype=np.float32)
+        cluster_sizes = unsup.get("cluster_sizes", [])
+        if not isinstance(cluster_sizes, list) or len(cluster_sizes) != len(centroids):
+            cluster_sizes = [0] * len(centroids)
+
+        valid_mask = np.asarray([int(x) >= self.min_cluster_size for x in cluster_sizes], dtype=bool)
+        if not np.any(valid_mask):
+            return None, {"cluster_source": "none_valid_cluster", "min_cluster_size": self.min_cluster_size}
 
         user_to_cluster = (self.prototype_bank or {}).get("user_to_cluster", {})
         if user_id is not None and isinstance(user_to_cluster, dict) and str(user_id) in user_to_cluster:
             cid = int(user_to_cluster[str(user_id)])
-            if 0 <= cid < len(centroids):
+            if 0 <= cid < len(centroids) and valid_mask[cid]:
                 return centroids[cid], {"cluster_id": cid, "cluster_source": "user_to_cluster"}
+            if 0 <= cid < len(centroids) and (not valid_mask[cid]):
+                return None, {
+                    "cluster_id": cid,
+                    "cluster_source": "user_to_cluster_too_small",
+                    "cluster_size": int(cluster_sizes[cid]),
+                    "min_cluster_size": self.min_cluster_size,
+                }
 
-        sims = cosine_similarity(anchor_embedding[None, :], centroids).squeeze()
-        cid = int(np.argmax(sims))
+        valid_centroids = centroids[valid_mask]
+        valid_ids = np.where(valid_mask)[0]
+        sims = cosine_similarity(anchor_embedding[None, :], valid_centroids).squeeze()
+        if np.ndim(sims) == 0:
+            chosen_pos = 0
+        else:
+            chosen_pos = int(np.argmax(sims))
+        cid = int(valid_ids[chosen_pos])
         return centroids[cid], {"cluster_id": cid, "cluster_source": "nearest_centroid"}
 
     def _compose_cohort_prototype(self, test_item, anchor_embedding):
@@ -144,11 +164,11 @@ class ColdStartRouter:
 
         m = int(user_history_size)
         if m <= 0 or user_history_embedding is None:
-            return cohort_proto, {"mode": "cohort_only", "blend_beta": 0.0, "meta": meta}
+            return cohort_proto, {"mode": "cohort_only", "history_lambda": 0.0, "meta": meta}
 
-        if m < self.m0:
-            beta = 1.0 - np.exp(-m / max(self.tau, 1e-8))
-            blended = l2_normalize((1 - beta) * cohort_proto + beta * user_history_embedding)
-            return blended, {"mode": "blend", "blend_beta": float(beta), "meta": meta}
+        lam = float(min(1.0, m / max(self.cold_start_k, 1e-8)))
+        if lam < 1.0:
+            blended = l2_normalize(lam * user_history_embedding + (1 - lam) * cohort_proto)
+            return blended, {"mode": "blend", "history_lambda": lam, "meta": meta}
 
-        return l2_normalize(user_history_embedding), {"mode": "individual", "blend_beta": 1.0, "meta": meta}
+        return l2_normalize(user_history_embedding), {"mode": "individual", "history_lambda": 1.0, "meta": meta}

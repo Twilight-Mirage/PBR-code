@@ -1,6 +1,6 @@
 # Experiments Workspace
 
-This directory is for fast A/B comparison on `src/retrieval/retrieval_PBR.py`.
+This directory is for fast A/B comparison on `src/retrieval/retrieval_PBR.py` and unified baseline orchestration.
 
 ## Structure
 
@@ -9,7 +9,11 @@ This directory is for fast A/B comparison on `src/retrieval/retrieval_PBR.py`.
 - `build_explicit_contrastive_pairs.py`: build triplets for contrastive user-representation training.
 - `train_explicit_user_encoder.py`: train explicit-user projector from triplets.
 - `run_retrieval_matrix.py`: batch runner for multiple retrieval settings.
+- `run_baseline_matrix.py`: unified runner for local baselines and official third-party baselines.
 - `summarize_retrieval_results.py`: aggregate metrics from multiple output JSON files.
+
+Project-level defaults (API key/base URL/default LongMemEval file) are centralized in project_settings.py.
+CLI args still have highest priority, then env vars, then project_settings.py.
 
 ## Quick Start
 
@@ -17,8 +21,8 @@ This directory is for fast A/B comparison on `src/retrieval/retrieval_PBR.py`.
 
 ```bash
 python experiments/build_coldstart_prototype_bank.py \
-  --input_json data/longmemeval_data/longmemeval_s.json \
-  --output_json data/longmemeval_data/prototype_bank_longmemeval_s.json \
+  --input_json data/longmemeval_data/longmemeval_s_cleaned.json \
+  --output_json data/longmemeval_data/prototype_bank_longmemeval_s_cleaned.json \
   --retrieval_model_name multi-qa-MiniLM-L6-cos-v1 \
   --num_clusters 8 \
   --label_keys department,role,team
@@ -28,7 +32,7 @@ python experiments/build_coldstart_prototype_bank.py \
 
 ```bash
 python experiments/build_explicit_contrastive_pairs.py \
-  --input_json data/longmemeval_data/longmemeval_s.json \
+  --input_json data/longmemeval_data/longmemeval_s_cleaned.json \
   --output_jsonl data/longmemeval_data/explicit_contrastive_pairs_s.jsonl \
   --retrieval_model_name multi-qa-MiniLM-L6-cos-v1 \
   --max_pairs_per_user 12
@@ -76,6 +80,81 @@ python experiments/run_retrieval_matrix.py --matrix experiments/configs/longmeme
 python experiments/summarize_retrieval_results.py --glob "data/longmemeval_data/*_PBR*.json"
 ```
 
+## Unified Baselines
+
+`run_baseline_matrix.py` unifies six baseline entry points:
+
+- `naive_rag`: local retrieval + generation pipeline (`run_retrieval.py` + `run_generation.py`).
+- `history_rag`: local history-only generation (`run_generation.py` with `orig-session` or `orig-turn`).
+- `llm_gt_baseline`: independent LLM-GT baseline (same generator/prompt/token budget, evidence source switched to `retrieved` or `oracle`).
+- `pgraphrag_official`: official `third_party_baselines/PGraphRAG/master_generation.py`.
+- `afce_official`: official `third_party_baselines/AP-Bots` (`python -m AP_Bots.run_exp`).
+- `lightrag_official`: official `third_party_baselines/LightRAG` script/command wrapper.
+
+Sample matrices:
+
+- `experiments/configs/baseline_unified_matrix.sample.json`
+- `experiments/configs/longmemeval_llmgt_baseline.sample.json` (retrieved vs oracle evidence only)
+
+Dry-run (recommended first):
+
+```bash
+<python_bin> experiments/run_baseline_matrix.py \
+  --matrix experiments/configs/baseline_unified_matrix.sample.json \
+  --dry_run
+```
+
+Run selected experiments only:
+
+```bash
+<python_bin> experiments/run_baseline_matrix.py \
+  --matrix experiments/configs/baseline_unified_matrix.sample.json \
+  --only naive_rag_local,history_rag_local
+```
+
+Notes for official baselines:
+
+- `PGraphRAG` and `AP-Bots` use their own input formats and dataset conventions; do not assume they directly consume LongMemEval/PersonaBench json.
+- `LightRAG` has no single benchmark CLI in upstream; matrix field `entry_script`/`command` is used as an adapter.
+- `run_baseline_matrix.py` now checks required file/repo paths before execution.
+
+## DUA End-to-End Matrix
+
+Use `run_dua_e2e_matrix.py` to run retrieval -> generation -> evaluation in one pass for ablations.
+
+Sample config:
+
+- `experiments/configs/longmemeval_dua_e2e_matrix.sample.json`
+
+Dry-run:
+
+```bash
+<python_bin> experiments/run_dua_e2e_matrix.py \
+  --matrix experiments/configs/longmemeval_dua_e2e_matrix.sample.json \
+  --dry_run
+```
+
+Run selected experiments:
+
+```bash
+<python_bin> experiments/run_dua_e2e_matrix.py \
+  --matrix experiments/configs/longmemeval_dua_e2e_matrix.sample.json \
+  --only pbr_base,pbr_temporal
+```
+## Readiness Check
+
+Before launching long jobs, run preflight checks for missing files/keys:
+
+```bash
+<python_bin> experiments/check_experiment_readiness.py --kind retrieval --matrix experiments/configs/longmemeval_temporal_matrix.json
+<python_bin> experiments/check_experiment_readiness.py --kind baseline --matrix experiments/configs/baseline_unified_matrix.sample.json
+<python_bin> experiments/check_experiment_readiness.py --kind dua --matrix experiments/configs/longmemeval_dua_e2e_matrix.sample.json
+```
+
+The checker reports:
+
+- `BLOCKER`: must be fixed before run.
+- `WARN`: recommended to fix, but execution may still continue depending on endpoint setup.
 ## Notes
 
 - Each experiment should define a unique `save_suffix` to avoid overwriting.
@@ -85,3 +164,5 @@ python experiments/summarize_retrieval_results.py --glob "data/longmemeval_data/
 - Trained explicit encoder is loaded with `--explicit_encoder_ckpt`.
 - Most args can be put in `global` for shared defaults, and overridden in each experiment's `args`.
 - Keep matrix files as the single source of truth for reproducible comparisons.
+
+
