@@ -7,49 +7,20 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 
 STOPWORDS = {
-    "a",
-    "an",
-    "and",
-    "are",
-    "as",
-    "at",
-    "be",
-    "by",
-    "for",
-    "from",
-    "has",
-    "he",
-    "in",
-    "is",
-    "it",
-    "its",
-    "of",
-    "on",
-    "or",
-    "that",
-    "the",
-    "to",
-    "was",
-    "were",
-    "will",
-    "with",
-    "you",
-    "your",
-    "i",
-    "we",
-    "they",
-    "this",
-    "those",
-    "these",
-    "my",
-    "our",
-    "their",
-    "me",
-    "us",
-    "them",
+    "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "has", "he", "in", "is", "it", "its",
+    "of", "on", "or", "that", "the", "to", "was", "were", "will", "with", "you", "your", "i", "we", "they",
+    "this", "those", "these", "my", "our", "their", "me", "us", "them",
 }
 
 FIRST_PERSON = {"i", "me", "my", "mine", "we", "us", "our", "ours"}
+
+TOPIC_LEXICONS = {
+    "work": {"project", "deadline", "meeting", "team", "manager", "report", "client", "office", "task"},
+    "learning": {"study", "course", "learn", "research", "paper", "exam", "university", "class", "thesis"},
+    "lifestyle": {"food", "travel", "movie", "music", "sport", "health", "family", "weekend", "home"},
+    "finance": {"budget", "cost", "price", "salary", "investment", "bank", "expense", "payment", "revenue"},
+    "technology": {"model", "code", "api", "system", "database", "server", "python", "algorithm", "deploy"},
+}
 
 
 def _tokenize(text):
@@ -82,17 +53,68 @@ def _extract_external_contrastive_examples(test_item, top_k=2, max_words=90):
                 txt = item
             if not isinstance(txt, str) or not txt.strip():
                 continue
-            out.append(
-                {
-                    "source": "external",
-                    "text": _truncate_words(txt, max_words=max_words),
-                }
-            )
+            out.append({"source": "external", "text": _truncate_words(txt, max_words=max_words)})
             if len(out) >= top_k:
                 break
         if out:
             return out
     return []
+
+
+def _extract_entity_stats(raw_turns):
+    text = "\n".join(raw_turns)
+    cap_entities = re.findall(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b", text)
+    email_entities = re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", text)
+    date_like = re.findall(r"\b\d{4}[-/]\d{1,2}[-/]\d{1,2}\b", text)
+    number_like = re.findall(r"\b\d+(?:\.\d+)?\b", text)
+
+    unique_cap = len(set(cap_entities))
+    return {
+        "named_entity_count": int(len(cap_entities) + len(email_entities) + len(date_like)),
+        "unique_named_entity_count": int(unique_cap + len(set(email_entities)) + len(set(date_like))),
+        "email_count": int(len(email_entities)),
+        "date_count": int(len(date_like)),
+        "number_count": int(len(number_like)),
+    }
+
+
+def _infer_topic_cluster(filtered_tokens):
+    if not filtered_tokens:
+        return "general", {}
+    token_counter = Counter(filtered_tokens)
+    score = {}
+    for topic, lex in TOPIC_LEXICONS.items():
+        score[topic] = sum(token_counter.get(tok, 0) for tok in lex)
+    best_topic = max(score, key=score.get) if score else "general"
+    if score.get(best_topic, 0) <= 0:
+        best_topic = "general"
+    total = sum(score.values())
+    if total <= 0:
+        dist = {k: 0.0 for k in score.keys()}
+    else:
+        dist = {k: float(v) / float(total) for k, v in score.items()}
+    return best_topic, dist
+
+
+def _estimate_dependency_patterns(raw_turns):
+    patterns = {
+        "first_person_modal": 0,
+        "first_person_verb": 0,
+        "wh_question": 0,
+        "negation": 0,
+    }
+    for turn in raw_turns:
+        t = str(turn)
+        low = t.lower()
+        if re.search(r"\b(i|we)\s+(can|should|will|must|might|could|would)\b", low):
+            patterns["first_person_modal"] += 1
+        if re.search(r"\b(i|we)\s+(think|feel|need|want|prefer|plan|believe|know)\b", low):
+            patterns["first_person_verb"] += 1
+        if re.search(r"\b(what|why|how|when|where|who|which)\b", low) and "?" in t:
+            patterns["wh_question"] += 1
+        if re.search(r"\b(not|never|no|can't|cannot|won't|don't|didn't|isn't|aren't)\b", low):
+            patterns["negation"] += 1
+    return patterns
 
 
 def build_explicit_feature_profile(history_turns_per_session, top_k_keywords=12, top_k_bigrams=6):
@@ -104,7 +126,9 @@ def build_explicit_feature_profile(history_turns_per_session, top_k_keywords=12,
             "turn_count": 0,
             "top_keywords": [],
             "top_bigrams": [],
+            "semantic": {},
             "style": {},
+            "syntax": {},
         }
 
     all_tokens = []
@@ -114,6 +138,7 @@ def build_explicit_feature_profile(history_turns_per_session, top_k_keywords=12,
     exclaim_cnt = 0
     turn_lengths = []
     session_lengths = []
+    punct_counter = Counter()
 
     for sess in sessions:
         sess_tokens = []
@@ -130,6 +155,10 @@ def build_explicit_feature_profile(history_turns_per_session, top_k_keywords=12,
                 question_cnt += 1
             if "!" in turn:
                 exclaim_cnt += 1
+            punct_counter["comma"] += turn.count(",")
+            punct_counter["period"] += turn.count(".")
+            punct_counter["question"] += turn.count("?")
+            punct_counter["exclaim"] += turn.count("!")
         if sess_tokens:
             session_lengths.append(len(sess_tokens))
 
@@ -153,6 +182,19 @@ def build_explicit_feature_profile(history_turns_per_session, top_k_keywords=12,
         "exclaim_turn_ratio": _safe_float(exclaim_cnt / max(turn_count, 1)),
         "first_person_ratio": _safe_float(first_person_cnt / max(token_count, 1)),
         "lexical_diversity": _safe_float(len(set(all_tokens)) / max(token_count, 1)),
+        "comma_per_turn": _safe_float(punct_counter["comma"] / max(turn_count, 1)),
+        "period_per_turn": _safe_float(punct_counter["period"] / max(turn_count, 1)),
+    }
+
+    topic_label, topic_dist = _infer_topic_cluster(filtered_tokens)
+    semantic = {
+        "topic_cluster_label": topic_label,
+        "topic_distribution": topic_dist,
+        "topic_keywords": top_keywords[: min(5, len(top_keywords))],
+        "entity_stats": _extract_entity_stats(all_turns),
+    }
+    syntax = {
+        "dependency_patterns": _estimate_dependency_patterns(all_turns),
     }
 
     return {
@@ -160,7 +202,9 @@ def build_explicit_feature_profile(history_turns_per_session, top_k_keywords=12,
         "turn_count": turn_count,
         "top_keywords": top_keywords,
         "top_bigrams": top_bigrams,
+        "semantic": semantic,
         "style": style,
+        "syntax": syntax,
     }
 
 
@@ -169,6 +213,8 @@ def render_explicit_feature_block(feature_profile):
         return ""
 
     style = feature_profile.get("style", {})
+    semantic = feature_profile.get("semantic", {})
+    syntax = feature_profile.get("syntax", {})
     keywords = feature_profile.get("top_keywords", [])
     bigrams = feature_profile.get("top_bigrams", [])
     if not keywords and not bigrams:
@@ -186,6 +232,18 @@ def render_explicit_feature_block(feature_profile):
             f"lexical_diversity={style.get('lexical_diversity', 0.0):.2f}"
         ),
     ]
+
+    topic_label = semantic.get("topic_cluster_label", "general")
+    entity_stats = semantic.get("entity_stats", {})
+    dep = syntax.get("dependency_patterns", {})
+    lines.append(f"- semantic: topic={topic_label}, entity_count={entity_stats.get('named_entity_count', 0)}")
+    lines.append(
+        "- syntax: "
+        f"first_person_modal={dep.get('first_person_modal', 0)}, "
+        f"wh_question={dep.get('wh_question', 0)}, "
+        f"negation={dep.get('negation', 0)}"
+    )
+
     if keywords:
         lines.append("- keywords: " + ", ".join(keywords))
     if bigrams:

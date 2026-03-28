@@ -194,13 +194,19 @@ class ColdStartRouter:
             if tau is None:
                 tau = float(max(self.cold_start_m0, 1))
             lam = 1.0 - float(np.exp(-float(m) / max(tau, 1e-8)))
-            return float(np.clip(lam, 0.0, 1.0)), "exp", {"tau": float(tau)}
+            lam = float(np.clip(lam, 0.0, 1.0))
+            # Exponential gate does not reach 1.0 for finite m; use m0 as the
+            # deterministic switch point to recover the intended "enough history
+            # -> individual" behavior from Algorithm B.
+            switch_to_individual = int(m) >= int(max(self.cold_start_m0, 1))
+            return lam, "exp", {"tau": float(tau), "switch_to_individual": switch_to_individual}
 
         k = self.cold_start_k
         if k is None:
             k = float(max(self.cold_start_m0, 1))
         lam = float(min(1.0, float(m) / max(k, 1e-8)))
-        return float(np.clip(lam, 0.0, 1.0)), "linear", {"k": float(k)}
+        switch_to_individual = bool(lam >= 1.0)
+        return float(np.clip(lam, 0.0, 1.0)), "linear", {"k": float(k), "switch_to_individual": switch_to_individual}
 
     def route(self, test_item, query_embedding, user_history_embedding, user_history_size):
         if not self.available:
@@ -224,7 +230,8 @@ class ColdStartRouter:
             }
 
         lam, gate, gate_meta = self._resolve_history_lambda(m)
-        if lam < 1.0:
+        switch_to_individual = bool(gate_meta.get("switch_to_individual", False))
+        if not switch_to_individual:
             blended = l2_normalize(lam * user_history_embedding + (1 - lam) * cohort_proto)
             out = {"mode": "blend", "history_lambda": lam, "history_gate": gate, "meta": meta}
             out.update(gate_meta)

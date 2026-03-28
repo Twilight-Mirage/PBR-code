@@ -242,6 +242,12 @@ class RAGRetriever:
         self.contrastive_max_words = int(explicit_cfg.get("contrastive_max_words", 90))
         self.contrastive_external_only = bool(explicit_cfg.get("contrastive_external_only", False))
         self.explicit_debug = bool(explicit_cfg.get("explicit_debug", False))
+        self.enable_short_term_state = bool(explicit_cfg.get("enable_short_term_state", True))
+        self.short_term_window = int(explicit_cfg.get("short_term_window", 3))
+        self.short_term_query_mix = float(explicit_cfg.get("short_term_query_mix", 0.4))
+        self.user_state_rerank_alpha = float(explicit_cfg.get("user_state_rerank_alpha", 0.25))
+        self.user_state_seed_alpha = float(explicit_cfg.get("user_state_seed_alpha", 0.15))
+        self.contrastive_online_alpha = float(explicit_cfg.get("contrastive_online_alpha", 0.1))
         self.explicit_encoder_ckpt = str(explicit_cfg.get("explicit_encoder_ckpt", "")).strip()
         self.explicit_encoder_device = str(explicit_cfg.get("explicit_encoder_device", "cpu"))
         self.explicit_encoder_meta = {"mode": "base_retriever_only"}
@@ -263,6 +269,11 @@ class RAGRetriever:
         self.explicit_feature_embedding = None
         self.contrastive_examples = []
         self.contrastive_block = ""
+        self.short_term_state_embedding = None
+        self.long_term_profile_embedding = None
+        self.user_state_embedding = None
+        self.user_state = {}
+        self.user_state_text = ""
 
     def _estimate_session_utility(self, sess_entry):
         user_turns = [x.get("content", "") for x in sess_entry if x.get("role") == "user"]
@@ -317,6 +328,114 @@ class RAGRetriever:
         temporal = np.clip(temporal, 1e-8, None)
         self.temporal_weights = temporal / (temporal.sum() + 1e-8)
 
+    def _encode_short_term_state(self, test_item, embeddings):
+        if not self.enable_short_term_state:
+            return None
+
+        recent_turns = []
+        for sess in test_item.get("haystack_sessions", [])[-max(self.short_term_window, 1):]:
+            if not isinstance(sess, list):
+                continue
+            for turn in sess:
+                if isinstance(turn, dict) and turn.get("role") == "user":
+                    txt = str(turn.get("content", "")).strip()
+                    if txt:
+                        recent_turns.append(txt)
+
+        current_context = []
+        for key in ("current_session", "current_context", "context", "dialogue_context"):
+            val = test_item.get(key)
+            if isinstance(val, str) and val.strip():
+                current_context.append(val.strip())
+            elif isinstance(val, list):
+                for item in val:
+                    if isinstance(item, str) and item.strip():
+                        current_context.append(item.strip())
+                    elif isinstance(item, dict):
+                        t = str(item.get("content", "")).strip()
+                        if t:
+                            current_context.append(t)
+
+        query = str(test_item.get("question", "")).strip()
+        parts = []
+        if query:
+            parts.append(f"[Query] {query}")
+        if current_context:
+            parts.append("[CurrentContext] " + " ".join(current_context[-8:]))
+        if recent_turns:
+            parts.append("[RecentHistory] " + " ".join(recent_turns[-20:]))
+
+        if not parts:
+            return None
+
+        st_text = "\n".join(parts)
+        st_emb = self.retriever_model.encode([st_text], convert_to_numpy=True)[0]
+        if embeddings is not None and len(embeddings) > 0:
+            recency_focus = embeddings[-max(self.short_term_window, 1):].mean(axis=0)
+            st_emb = (1 - self.short_term_query_mix) * recency_focus + self.short_term_query_mix * st_emb
+        return l2_normalize(st_emb)
+
+    def _apply_online_contrastive_adjustment(self, anchor_embedding):
+        if anchor_embedding is None:
+            return None
+        if not self.contrastive_examples or self.contrastive_online_alpha <= 0:
+            return l2_normalize(anchor_embedding)
+
+        neg_texts = []
+        for ex in self.contrastive_examples:
+            txt = str(ex.get("text", "")).strip()
+            if txt:
+                neg_texts.append(txt)
+        if not neg_texts:
+            return l2_normalize(anchor_embedding)
+
+        neg_emb = self.retriever_model.encode(neg_texts, convert_to_numpy=True)
+        neg_center = neg_emb.mean(axis=0)
+        adjusted = anchor_embedding - self.contrastive_online_alpha * neg_center
+        return l2_normalize(adjusted)
+
+    def _build_unified_user_state(self, p_hat, explicit_emb, short_term_emb):
+        state = {
+            "profile_long": l2_normalize(p_hat) if p_hat is not None else None,
+            "profile_short": l2_normalize(short_term_emb) if short_term_emb is not None else None,
+            "explicit": l2_normalize(explicit_emb) if explicit_emb is not None else None,
+        }
+
+        fused = None
+        if state["profile_long"] is not None and state["profile_short"] is not None:
+            fused = l2_normalize(
+                (1 - self.short_term_blend) * state["profile_long"] + self.short_term_blend * state["profile_short"]
+            )
+        elif state["profile_long"] is not None:
+            fused = state["profile_long"]
+        elif state["profile_short"] is not None:
+            fused = state["profile_short"]
+
+        if fused is not None and state["explicit"] is not None:
+            unified = l2_normalize((1 - self.explicit_profile_mix) * fused + self.explicit_profile_mix * state["explicit"])
+        elif state["explicit"] is not None:
+            unified = state["explicit"]
+        else:
+            unified = fused
+
+        state["profile_fused"] = fused
+        state["unified"] = unified
+        return state
+    def _render_user_state_block(self):
+        has_long = self.user_state.get("profile_long") is not None
+        has_short = self.user_state.get("profile_short") is not None
+        has_explicit = self.user_state.get("explicit") is not None
+        has_unified = self.user_state.get("unified") is not None
+        route_mode = self.cold_start_route_info.get("mode", "individual")
+        return (
+            "Unified User State\n"
+            f"- route_mode: {route_mode}\n"
+            f"- has_long_profile: {has_long}\n"
+            f"- has_short_state: {has_short}\n"
+            f"- has_explicit_state: {has_explicit}\n"
+            f"- has_unified_state: {has_unified}"
+        )
+
     def query_seed_weighted(self, questions, top_k=10):
         """
         Seed retrieval with temporal/persona-aware reweighting.
@@ -336,14 +455,9 @@ class RAGRetriever:
         else:
             weighted_scores = sim_scores
 
-        if self.enable_cold_start_router and self.user_profile_embedding is not None:
-            profile_sim = cosine_similarity(self.memory_embeddings, self.user_profile_embedding[None, :]).squeeze()
-            if self.cold_start_route_info.get("mode") in {"cohort_only", "blend"}:
-                weighted_scores = weighted_scores * (1 + self.cold_start_seed_profile_alpha * profile_sim)
-
-        if self.enable_explicit_profile and self.explicit_feature_embedding is not None:
-            feature_sim = cosine_similarity(self.memory_embeddings, self.explicit_feature_embedding[None, :]).squeeze()
-            weighted_scores = weighted_scores * (1 + self.explicit_seed_feature_alpha * feature_sim)
+        if self.user_state_embedding is not None:
+            state_sim = cosine_similarity(self.memory_embeddings, self.user_state_embedding[None, :]).squeeze()
+            weighted_scores = weighted_scores * (1 + self.user_state_seed_alpha * state_sim)
 
         idx = np.argsort(weighted_scores)[::-1][:top_k]
         d_scores = weighted_scores[idx][None, :].astype(np.float32)
@@ -379,6 +493,29 @@ class RAGRetriever:
 
         return np.stack(reranked_D), np.stack(reranked_I)
 
+    def _user_state_rerank(self, D, I, top_k):
+        if self.user_state_embedding is None:
+            return D[:, :top_k], I[:, :top_k]
+
+        reranked_D = []
+        reranked_I = []
+        for row in range(I.shape[0]):
+            valid_mask = I[row] >= 0
+            valid_idx = I[row][valid_mask]
+            valid_scores = D[row][valid_mask]
+            if len(valid_idx) == 0:
+                reranked_D.append(np.array([], dtype=np.float32))
+                reranked_I.append(np.array([], dtype=np.int64))
+                continue
+
+            state_scores = np.atleast_1d(
+                cosine_similarity(self.memory_embeddings[valid_idx], self.user_state_embedding[None, :]).squeeze()
+            )
+            mixed_scores = (1 - self.user_state_rerank_alpha) * valid_scores + self.user_state_rerank_alpha * state_scores
+            order = np.argsort(mixed_scores)[::-1][:top_k]
+            reranked_D.append(mixed_scores[order].astype(np.float32))
+            reranked_I.append(valid_idx[order].astype(np.int64))
+        return np.stack(reranked_D), np.stack(reranked_I)
     def _profile_rerank(self, D, I, top_k):
         if (not self.enable_cold_start_router) or (self.user_profile_embedding is None):
             return D[:, :top_k], I[:, :top_k]
@@ -525,10 +662,13 @@ class RAGRetriever:
         else:
             base_profile_embedding = None
 
+        self.long_term_profile_embedding = l2_normalize(base_profile_embedding) if base_profile_embedding is not None else None
+        self.short_term_state_embedding = self._encode_short_term_state(test_item, embeddings)
+
         self.user_profile_embedding, self.cold_start_route_info = self.cold_router.route(
             test_item=test_item,
             query_embedding=query_embedding,
-            user_history_embedding=base_profile_embedding,
+            user_history_embedding=self.long_term_profile_embedding,
             user_history_size=self.valid_history_size,
         )
         self.user_profile_embedding = l2_normalize(self.user_profile_embedding)
@@ -549,10 +689,6 @@ class RAGRetriever:
                     self.explicit_feature_embedding = l2_normalize(
                         self.retriever_model.encode([self.explicit_feature_text], convert_to_numpy=True)[0]
                     )
-                self.user_profile_embedding = l2_normalize(
-                    (1 - self.explicit_profile_mix) * self.user_profile_embedding
-                    + self.explicit_profile_mix * self.explicit_feature_embedding
-                )
             else:
                 self.explicit_feature_embedding = None
 
@@ -567,12 +703,23 @@ class RAGRetriever:
                 external_only=self.contrastive_external_only,
             )
             self.contrastive_block = render_contrastive_block(self.contrastive_examples)
+            self.explicit_feature_embedding = self._apply_online_contrastive_adjustment(self.explicit_feature_embedding)
         else:
             self.explicit_feature_profile = {}
             self.explicit_feature_text = ""
             self.explicit_feature_embedding = None
             self.contrastive_examples = []
             self.contrastive_block = ""
+
+        self.user_state = self._build_unified_user_state(
+            p_hat=self.user_profile_embedding,
+            explicit_emb=self.explicit_feature_embedding,
+            short_term_emb=self.short_term_state_embedding,
+        )
+        self.user_state_embedding = self.user_state.get("unified")
+        if self.user_state_embedding is not None:
+            self.user_profile_embedding = self.user_state_embedding
+        self.user_state_text = self._render_user_state_block()
 
         self.memory_embeddings = embeddings
         t2 = time.perf_counter()
@@ -684,8 +831,7 @@ class RAGRetriever:
         candidate_k = min(len(self.chunks), max(top_k, top_k * self.seed_candidate_multiplier))
         d_scores, i_rankings = self.index.search(q_embeddings, candidate_k)
         d_scores, i_rankings = self._temporal_rerank(d_scores, i_rankings, top_k)
-        d_scores, i_rankings = self._profile_rerank(d_scores, i_rankings, top_k)
-        d_scores, i_rankings = self._explicit_rerank(d_scores, i_rankings, top_k)
+        d_scores, i_rankings = self._user_state_rerank(d_scores, i_rankings, top_k)
 
         rankings_id = self.segment_ids[i_rankings].tolist()[0]
         retrieved_chunks = np.array(self.chunks)[i_rankings].tolist()[0]
@@ -722,8 +868,7 @@ class RAGRetriever:
         candidate_k = min(len(self.chunks), max(top_k, top_k * self.seed_candidate_multiplier))
         d_scores, i_rankings = self.index.search(q_embeddings[None, :], candidate_k)
         d_scores, i_rankings = self._temporal_rerank(d_scores, i_rankings, top_k)
-        d_scores, i_rankings = self._profile_rerank(d_scores, i_rankings, top_k)
-        d_scores, i_rankings = self._explicit_rerank(d_scores, i_rankings, top_k)
+        d_scores, i_rankings = self._user_state_rerank(d_scores, i_rankings, top_k)
 
         rankings_id = self.segment_ids[i_rankings].tolist()[0]
         retrieved_chunks = np.array(self.chunks)[i_rankings].tolist()[0]
@@ -921,7 +1066,12 @@ if __name__ == "__main__":
         help="Device for explicit-user projector loading (e.g., cpu, cuda:0).",
     )
     parser.add_argument("--explicit_debug", action="store_true", help="Dump explicit-profile debug fields to output json.")
-
+    parser.add_argument("--enable_short_term_state", action="store_true", help="Enable short-term state encoder branch.")
+    parser.add_argument("--short_term_window", type=int, default=3, help="Number of recent sessions used by short-term state encoder.")
+    parser.add_argument("--short_term_query_mix", type=float, default=0.4, help="Mix ratio between query-conditioned state and recent-history center.")
+    parser.add_argument("--user_state_rerank_alpha", type=float, default=0.25, help="Blend ratio of unified user state in reranking.")
+    parser.add_argument("--user_state_seed_alpha", type=float, default=0.15, help="Unified user-state boost in seed retrieval.")
+    parser.add_argument("--contrastive_online_alpha", type=float, default=0.1, help="Online contrastive repulsion strength for explicit embedding.")
     parser.add_argument("--k_seed", type=int, default=10, help="K_seed for P-PRF++ seed history sampling.")
     parser.add_argument("--top_k_retrieval", type=int, default=10, help="Top-K used for final retrieval evaluation.")
     parser.add_argument("--save_suffix", type=str, default="", help="Optional suffix for output json file.")
@@ -992,10 +1142,26 @@ if __name__ == "__main__":
         "explicit_encoder_ckpt": args.explicit_encoder_ckpt,
         "explicit_encoder_device": args.explicit_encoder_device,
         "explicit_debug": args.explicit_debug,
+        "enable_short_term_state": (args.enable_short_term_state or enable_temporal_profile),
+        "short_term_window": args.short_term_window,
+        "short_term_query_mix": args.short_term_query_mix,
+        "user_state_rerank_alpha": args.user_state_rerank_alpha,
+        "user_state_seed_alpha": args.user_state_seed_alpha,
+        "contrastive_online_alpha": args.contrastive_online_alpha,
     }
+    if enable_explicit_profile and (not explicit_cfg.get("explicit_encoder_ckpt")):
+        auto_ckpt_candidates = [
+            Path(f"./data/longmemeval_data/explicit_user_encoder_{args.data_type}.pt"),
+            Path("./data/longmemeval_data/explicit_user_encoder_s.pt"),
+        ]
+        for c in auto_ckpt_candidates:
+            if c.exists():
+                explicit_cfg["explicit_encoder_ckpt"] = str(c.resolve())
+                explicit_cfg["explicit_encoder_ckpt_auto"] = True
+                break
+
     explicit_cfg_for_log = dict(explicit_cfg)
     print("explicit_profile:", enable_explicit_profile)
-
     enable_cold_start_router = args.cold_start_router or method_lc in {
         "pbr_cold",
         "pbr_coldstart",
@@ -1064,6 +1230,7 @@ if __name__ == "__main__":
     out_json = []
     uttr_prompt = []
     rea_prompt = []
+    prepared_items = []
 
     for test_item in tqdm(in_data):
         question = test_item["question"]
@@ -1086,11 +1253,19 @@ if __name__ == "__main__":
             question,
             docs,
             "",
-            explicit_feature_block=retriever.explicit_feature_text,
+            explicit_feature_block="\n\n".join([x for x in [retriever.user_state_text, retriever.explicit_feature_text] if isinstance(x, str) and x.strip()]),
             contrastive_block=retriever.contrastive_block,
         )
         uttr_prompt.append(p_uttr_prompt)
         rea_prompt.append(p_rea_prompt)
+        prepared_items.append(
+            {
+                "test_item": test_item,
+                "question": question,
+                "retriever": retriever,
+                "corpus_ids": [item for item in test_item["haystack_session_ids"]],
+            }
+        )
 
     llm_api_key = resolve_api_key(explicit_key=args.llm_api_key.strip(), env_name=args.llm_api_key_env)
     llm_base_url = resolve_base_url(explicit_base=args.llm_base_url.strip(), env_name="OPENAI_BASE_URL")
@@ -1138,17 +1313,10 @@ if __name__ == "__main__":
     )
     print("end_generation")
 
-    for idx, test_item in tqdm(enumerate(in_data)):
-        question = test_item["question"]
-        retriever = RAGRetriever(
-            retriever_model,
-            retriever_model_name,
-            data_type,
-            temporal_cfg=temporal_cfg,
-            coldstart_cfg=coldstart_cfg,
-            explicit_cfg=explicit_cfg,
-        )
-        retriever.build_index(test_item)
+    for idx, prepared in tqdm(enumerate(prepared_items)):
+        test_item = prepared["test_item"]
+        question = prepared["question"]
+        retriever = prepared["retriever"]
         questions = [question]
         try:
             fake_10 = load_json_res(async_uttr_responses[idx])["candidates"]
@@ -1163,7 +1331,7 @@ if __name__ == "__main__":
             questions,
             top_k=args.top_k_retrieval,
         )
-        corpus_ids = [item for item in test_item["haystack_session_ids"]]
+        corpus_ids = prepared["corpus_ids"]
 
         ret_res = []
 
@@ -1214,6 +1382,12 @@ if __name__ == "__main__":
                 cur_results["explicit_encoder_meta"] = retriever.explicit_encoder_meta
                 cur_results["explicit_feature_profile"] = retriever.explicit_feature_profile
                 cur_results["contrastive_examples"] = retriever.contrastive_examples
+                cur_results["user_state"] = {
+                    "has_long": retriever.user_state.get("profile_long") is not None,
+                    "has_short": retriever.user_state.get("profile_short") is not None,
+                    "has_explicit": retriever.user_state.get("explicit") is not None,
+                    "has_unified": retriever.user_state.get("unified") is not None,
+                }
 
         # 优先使用样本显式提供的正确 session/document ID
         correct_docs = list(dict.fromkeys(test_item.get("answer_session_ids", [])))
