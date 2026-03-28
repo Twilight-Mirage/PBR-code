@@ -1,0 +1,10 @@
+[START] runner=retrieval_matrix dry_run=True matrix=D:\研三\毕设\PBR-code\experiments\configs\longmemeval_temporal_matrix.json
+[MATRIX] selected_experiments=1 run_root=D:\研三\毕设\PBR-code\experiments\runs\retrieval_matrix
+[RUN] pbr_base [1/1]
+[PROGRESS] exp 1/1, step 1/1
+[STEP] retrieval
+[CMD]  C:\Users\huaji\AppData\Local\Programs\Python\Python312\python.exe -m src.retrieval.retrieval_PBR --model_type PBR --data_type s --retrieval_model_name D:\研三\毕设\temporal-rag\embedding_model --embedding_task auto --k_seed 10 --top_k_retrieval 10 --save_suffix _exp_pbr_base
+[CWD]  D:\研三\毕设\PBR-code
+[STEP-END] retrieval status=dry_run duration=0.002s
+[MANIFEST] D:\研三\毕设\PBR-code\experiments\runs\retrieval_matrix\pbr_base\manifest.json
+[END] status=success error=

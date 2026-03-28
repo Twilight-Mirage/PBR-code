@@ -1,0 +1,15 @@
+[START] runner=dua_e2e_matrix dry_run=True matrix=D:\研三\毕设\PBR-code\experiments\configs\longmemeval_dua_e2e_matrix.sample.json
+[MATRIX] selected_experiments=1 run_root=D:\研三\毕设\PBR-code\experiments\runs\dua_e2e
+[RUN] pbr_base [1/1]
+[PROGRESS] exp 1/1, step 1/2
+[STEP] retrieval
+[CMD]  C:\Users\huaji\AppData\Local\Programs\Python\Python312\python.exe -m src.retrieval.retrieval_PBR --model_type PBR --data_type s --retrieval_model_name D:\研三\毕设\temporal-rag\embedding_model --embedding_task auto --in_file D:\研三\毕设\PBR-code\data\longmemeval_data\longmemeval_s_cleaned.json --out_file D:\研三\毕设\PBR-code\experiments\runs\dua_e2e\pbr_base\pbr_base_retrieval.json --save_suffix _exp_base --llm_api_key sk-e5ae65daa99b44009c008e6a7087177e --llm_api_key_env OPENAI_API_KEY --llm_base_url  --llm_model gpt-4o-mini --llm_max_tokens 512 --llm_temperature 0.0 --k_seed 10 --top_k_retrieval 10
+[CWD]  D:\研三\毕设\PBR-code
+[STEP-END] retrieval status=dry_run duration=0.002s
+[PROGRESS] exp 1/1, step 2/2
+[STEP] generation
+[CMD]  C:\Users\huaji\AppData\Local\Programs\Python\Python312\python.exe -m src.generation.run_generation --in_file D:\研三\毕设\PBR-code\experiments\runs\dua_e2e\pbr_base\pbr_base_retrieval.json --out_dir D:\研三\毕设\PBR-code\experiments\runs\dua_e2e\pbr_base --out_file D:\研三\毕设\PBR-code\experiments\runs\dua_e2e\pbr_base\pbr_base_hypotheses.jsonl --model_name gpt-4o-mini-2024-07-18 --model_alias gpt4o-mini --openai_key sk-e5ae65daa99b44009c008e6a7087177e --retriever_type flat-session --topk_context 10 --history_format json --useronly false --cot false --con false --merge_key_expansion_into_value none
+[CWD]  D:\研三\毕设\PBR-code
+[STEP-END] generation status=dry_run duration=0.000s
+[MANIFEST] D:\研三\毕设\PBR-code\experiments\runs\dua_e2e\pbr_base\manifest.json
+[END] status=success error=

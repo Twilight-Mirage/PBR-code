@@ -226,3 +226,20 @@ Then evaluate with the same evaluator:
 Additional sample matrix:
 
 - `experiments/configs/official_adapter_eval.sample.json`
+
+## Progress and Logs
+
+Matrix runners now record detailed progress and persistent logs:
+
+- Console progress: experiment and step progress (`exp i/N, step j/M`).
+- Structured events: `<run_root>/_logs/<session>/events.jsonl`.
+- Human-readable run log: `<run_root>/_logs/<session>/run.log`.
+- Per-step raw output: `<run_root>/_logs/<session>/<experiment>/stepXX_<name>.log`.
+- Sensitive CLI values (`--openai_key`, `--llm_api_key`) are redacted in progress logs/events/manifests.
+- Per-experiment manifest includes `status`, `duration_sec`, and `step_results` with log paths.
+
+Covered runners:
+
+- `experiments/run_retrieval_matrix.py`
+- `experiments/run_dua_e2e_matrix.py`
+- `experiments/run_baseline_matrix.py`

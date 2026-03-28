@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import subprocess
+import time
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -16,7 +17,7 @@ from src.common.project_runtime import (
     resolve_default_embedding_task,
     resolve_default_retrieval_model_name,
 )
-
+from experiments.experiment_logging import MatrixRunLogger, redact_command, run_logged_step
 
 def ensure_dir(path):
     Path(path).mkdir(parents=True, exist_ok=True)
@@ -42,14 +43,42 @@ def add_cli_arg(cmd, key, value):
     cmd.extend([flag, str(value)])
 
 
-def run_step(step, dry_run=False):
-    print(f"[STEP] {step['name']}")
-    print(" ".join(step["cmd"]))
-    print(f"[CWD]  {step['cwd']}")
-    if not dry_run:
-        subprocess.run(step["cmd"], cwd=step["cwd"], check=True, env=build_subprocess_env())
+def run_step(
+    step,
+    dry_run=False,
+    logger=None,
+    exp_name="",
+    exp_index=1,
+    exp_total=1,
+    step_index=1,
+    step_total=1,
+):
+    wrapped_step = dict(step)
 
+    if logger is None:
+        print(f"[STEP] {wrapped_step['name']}")
+        print(" ".join(wrapped_step["cmd"]))
+        print(f"[CWD]  {wrapped_step['cwd']}")
+        if not dry_run:
+            subprocess.run(wrapped_step["cmd"], cwd=wrapped_step["cwd"], check=True, env=build_subprocess_env())
+        return {
+            "status": "dry_run" if dry_run else "success",
+            "returncode": 0,
+            "duration_sec": 0.0,
+            "step_log": "",
+        }
 
+    return run_logged_step(
+        step=wrapped_step,
+        env=build_subprocess_env(),
+        dry_run=dry_run,
+        logger=logger,
+        exp_name=exp_name,
+        exp_index=exp_index,
+        exp_total=exp_total,
+        step_index=step_index,
+        step_total=step_total,
+    )
 def resolve_key(cfg_local, cfg_global, key_local="openai_key", key_env_local="openai_key_env", default_env="OPENAI_API_KEY"):
     env_name = cfg_local.get(key_env_local, cfg_global.get(key_env_local, default_env))
     key = cfg_local.get(key_local, os.getenv(env_name, ""))
@@ -290,88 +319,173 @@ def main():
     if args.only:
         only = {x.strip() for x in args.only.split(",") if x.strip()}
 
-    for exp in experiments:
-        name = exp["name"]
-        if only and name not in only:
-            continue
+    selected_experiments = [exp for exp in experiments if (not only or exp["name"] in only)]
 
-        print(f"[RUN] {name}")
-        run_dir = run_root / name
-        ensure_dir(run_dir)
+    logger = MatrixRunLogger(
+        run_root=run_root,
+        matrix_path=matrix_path,
+        runner_name="dua_e2e_matrix",
+        dry_run=args.dry_run,
+    )
+    logger.info(f"[MATRIX] selected_experiments={len(selected_experiments)} run_root={run_root}")
+    logger.event(
+        "matrix_plan",
+        total_experiments=len(selected_experiments),
+        experiment_names=[exp["name"] for exp in selected_experiments],
+    )
 
-        retrieval_out = run_dir / f"{name}_retrieval.json"
-        generation_out = run_dir / f"{name}_hypotheses.jsonl"
-
-        local_args = exp.get("args", {})
-        cur_in_value = local_args.get("in_file", str(default_in_path))
-        cur_in_path = Path(cur_in_value)
-        if not cur_in_path.is_absolute():
-            cur_in_path = (repo_root / cur_in_path).resolve()
-        else:
-            cur_in_path = cur_in_path.resolve()
-        if not cur_in_path.exists():
-            raise FileNotFoundError(f"Experiment '{name}' input file not found: {cur_in_path}")
-
-        cur_ref_value = local_args.get("ref_json", global_cfg.get("ref_json", str(cur_in_path)))
-        cur_ref_json = Path(cur_ref_value)
-        if not cur_ref_json.is_absolute():
-            cur_ref_json = (repo_root / cur_ref_json).resolve()
-        else:
-            cur_ref_json = cur_ref_json.resolve()
-
-        retrieval_cmd = build_retrieval_cmd(
-            repo_root=repo_root,
-            python_bin=args.python_bin,
-            global_cfg=global_cfg,
-            exp_cfg=exp,
-            retrieval_in=cur_in_path,
-            retrieval_out=retrieval_out,
-        )
-        generation_cmd = build_generation_cmd(
-            repo_root=repo_root,
-            python_bin=args.python_bin,
-            global_cfg=global_cfg,
-            exp_cfg=exp,
-            retrieval_out=retrieval_out,
-            generation_out=generation_out,
-            run_dir=run_dir,
-        )
-
-        steps = [
-            {"name": "retrieval", "cmd": retrieval_cmd, "cwd": str(repo_root)},
-            {"name": "generation", "cmd": generation_cmd, "cwd": str(repo_root)},
-        ]
-
-        cur_run_eval = bool(local_args.get("run_eval", run_eval))
-        if cur_run_eval:
-            eval_cmd = build_eval_cmd(
-                repo_root=repo_root,
-                python_bin=args.python_bin,
-                global_cfg=global_cfg,
-                exp_cfg=exp,
-                generation_out=generation_out,
-                ref_json=cur_ref_json,
+    matrix_status = "success"
+    matrix_error = ""
+    try:
+        for exp_index, exp in enumerate(selected_experiments, 1):
+            name = exp["name"]
+            logger.info(f"[RUN] {name} [{exp_index}/{len(selected_experiments)}]")
+            logger.event(
+                "experiment_start",
+                experiment=name,
+                experiment_index=exp_index,
+                total_experiments=len(selected_experiments),
             )
-            steps.append({"name": "eval", "cmd": eval_cmd, "cwd": str(repo_root)})
 
-        for step in steps:
-            run_step(step, dry_run=args.dry_run)
+            exp_t0 = time.time()
+            status = "dry_run" if args.dry_run else "success"
+            error = ""
+            step_results = []
+            steps = []
+            cur_in_path = None
+            cur_ref_json = None
+            retrieval_out = None
+            generation_out = None
 
-        manifest = {
-            "name": name,
-            "matrix": str(matrix_path),
-            "created_at": datetime.now().isoformat(timespec="seconds"),
-            "in_file": str(cur_in_path),
-            "retrieval_output": str(retrieval_out),
-            "generation_output": str(generation_out),
-            "ref_json": str(cur_ref_json),
-            "steps": steps,
-            "dry_run": bool(args.dry_run),
-        }
-        manifest_path = run_dir / "manifest.json"
-        manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
-        print(f"[MANIFEST] {manifest_path}")
+            try:
+                run_dir = run_root / name
+                ensure_dir(run_dir)
 
+                retrieval_out = run_dir / f"{name}_retrieval.json"
+                generation_out = run_dir / f"{name}_hypotheses.jsonl"
+
+                local_args = exp.get("args", {})
+                cur_in_value = local_args.get("in_file", str(default_in_path))
+                cur_in_path = Path(cur_in_value)
+                if not cur_in_path.is_absolute():
+                    cur_in_path = (repo_root / cur_in_path).resolve()
+                else:
+                    cur_in_path = cur_in_path.resolve()
+                if not cur_in_path.exists():
+                    raise FileNotFoundError(f"Experiment '{name}' input file not found: {cur_in_path}")
+
+                cur_ref_value = local_args.get("ref_json", global_cfg.get("ref_json", str(cur_in_path)))
+                cur_ref_json = Path(cur_ref_value)
+                if not cur_ref_json.is_absolute():
+                    cur_ref_json = (repo_root / cur_ref_json).resolve()
+                else:
+                    cur_ref_json = cur_ref_json.resolve()
+
+                retrieval_cmd = build_retrieval_cmd(
+                    repo_root=repo_root,
+                    python_bin=args.python_bin,
+                    global_cfg=global_cfg,
+                    exp_cfg=exp,
+                    retrieval_in=cur_in_path,
+                    retrieval_out=retrieval_out,
+                )
+                generation_cmd = build_generation_cmd(
+                    repo_root=repo_root,
+                    python_bin=args.python_bin,
+                    global_cfg=global_cfg,
+                    exp_cfg=exp,
+                    retrieval_out=retrieval_out,
+                    generation_out=generation_out,
+                    run_dir=run_dir,
+                )
+
+                steps = [
+                    {"name": "retrieval", "cmd": retrieval_cmd, "cwd": str(repo_root)},
+                    {"name": "generation", "cmd": generation_cmd, "cwd": str(repo_root)},
+                ]
+
+                cur_run_eval = bool(local_args.get("run_eval", run_eval))
+                if cur_run_eval:
+                    eval_cmd = build_eval_cmd(
+                        repo_root=repo_root,
+                        python_bin=args.python_bin,
+                        global_cfg=global_cfg,
+                        exp_cfg=exp,
+                        generation_out=generation_out,
+                        ref_json=cur_ref_json,
+                    )
+                    steps.append({"name": "eval", "cmd": eval_cmd, "cwd": str(repo_root)})
+
+                for step_index, step in enumerate(steps, 1):
+                    result = run_step(
+                        step,
+                        dry_run=args.dry_run,
+                        logger=logger,
+                        exp_name=name,
+                        exp_index=exp_index,
+                        exp_total=len(selected_experiments),
+                        step_index=step_index,
+                        step_total=len(steps),
+                    )
+                    step_results.append(
+                        {
+                            "name": step.get("name", f"step{step_index}"),
+                            "status": result.get("status"),
+                            "returncode": result.get("returncode"),
+                            "duration_sec": result.get("duration_sec"),
+                            "step_log": result.get("step_log", ""),
+                        }
+                    )
+            except Exception as exc:
+                status = "failed"
+                error = repr(exc)
+                matrix_status = "failed"
+                matrix_error = error
+                logger.event("experiment_error", experiment=name, error=error)
+                raise
+            finally:
+                exp_elapsed = round(time.time() - exp_t0, 3)
+                run_dir = run_root / name
+                steps_redacted = []
+                for _s in steps:
+                    _item = dict(_s)
+                    _cmd = _item.get("cmd")
+                    if isinstance(_cmd, list):
+                        _item["cmd"] = redact_command(_cmd)
+                    steps_redacted.append(_item)
+
+                manifest = {
+                    "name": name,
+                    "matrix": str(matrix_path),
+                    "created_at": datetime.now().isoformat(timespec="seconds"),
+                    "status": status,
+                    "error": error,
+                    "duration_sec": exp_elapsed,
+                    "in_file": str(cur_in_path) if cur_in_path else "",
+                    "retrieval_output": str(retrieval_out) if retrieval_out else "",
+                    "generation_output": str(generation_out) if generation_out else "",
+                    "ref_json": str(cur_ref_json) if cur_ref_json else "",
+                    "steps": steps_redacted,
+                    "step_results": step_results,
+                    "dry_run": bool(args.dry_run),
+                    "log_dir": str(logger.log_dir),
+                    "run_log": str(logger.text_log),
+                    "events_log": str(logger.events_log),
+                    "experiment_log_dir": str(logger.experiment_log_dir(name)),
+                }
+                manifest_path = run_dir / "manifest.json"
+                manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+                logger.info(f"[MANIFEST] {manifest_path}")
+                logger.event(
+                    "experiment_end",
+                    experiment=name,
+                    status=status,
+                    error=error,
+                    duration_sec=exp_elapsed,
+                    manifest=str(manifest_path),
+                )
+    finally:
+        logger.finalize(status=matrix_status, error=matrix_error)
 
 if __name__ == "__main__":
     main()

@@ -3,6 +3,7 @@ import json
 import os
 import shlex
 import subprocess
+import time
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -17,6 +18,7 @@ from src.common.project_runtime import (
     resolve_default_embedding_task,
     resolve_default_retrieval_model_name,
 )
+from experiments.experiment_logging import MatrixRunLogger, redact_command, run_logged_step
 
 
 def ensure_dir(path):
@@ -50,18 +52,46 @@ def render_placeholders(obj, ctx):
     return obj
 
 
-def run_step(step, dry_run=False):
+def run_step(
+    step,
+    dry_run=False,
+    logger=None,
+    exp_name="",
+    exp_index=1,
+    exp_total=1,
+    step_index=1,
+    step_total=1,
+):
     cmd = normalize_command(step["cmd"])
-    cwd = step.get("cwd")
-    print(f"[STEP] {step['name']}")
-    print(" ".join(cmd))
-    if cwd:
-        print(f"[CWD]  {cwd}")
-    if not dry_run:
-        subprocess.run(cmd, cwd=cwd, check=True, env=build_subprocess_env())
+    wrapped_step = dict(step)
+    wrapped_step["cmd"] = cmd
 
+    if logger is None:
+        cwd = wrapped_step.get("cwd")
+        print(f"[STEP] {wrapped_step['name']}")
+        print(" ".join(cmd))
+        if cwd:
+            print(f"[CWD]  {cwd}")
+        if not dry_run:
+            subprocess.run(cmd, cwd=cwd, check=True, env=build_subprocess_env())
+        return {
+            "status": "dry_run" if dry_run else "success",
+            "returncode": 0,
+            "duration_sec": 0.0,
+            "step_log": "",
+        }
 
-
+    return run_logged_step(
+        step=wrapped_step,
+        env=build_subprocess_env(),
+        dry_run=dry_run,
+        logger=logger,
+        exp_name=exp_name,
+        exp_index=exp_index,
+        exp_total=exp_total,
+        step_index=step_index,
+        step_total=step_total,
+    )
 def add_cli_arg(cmd, key, value):
     flag = f"--{key}"
     if value is None:
@@ -913,43 +943,127 @@ def main():
         "custom": build_custom_steps,
     }
 
-    for exp in exps:
-        name = exp["name"]
-        if only and name not in only:
-            continue
-        method = exp.get("method", "").strip()
-        if method not in builders:
-            raise ValueError(f"Unknown method '{method}' for experiment '{name}'.")
+    selected_exps = [exp for exp in exps if (not only or exp["name"] in only)]
 
-        print(f"[RUN] {name} ({method})")
-        steps, metadata = builders[method](repo_root, args.python_bin, global_cfg, exp)
+    logger = MatrixRunLogger(
+        run_root=run_root,
+        matrix_path=matrix_path,
+        runner_name="baseline_matrix",
+        dry_run=args.dry_run,
+    )
+    logger.info(f"[MATRIX] selected_experiments={len(selected_exps)} run_root={run_root}")
+    logger.event(
+        "matrix_plan",
+        total_experiments=len(selected_exps),
+        experiment_names=[exp["name"] for exp in selected_exps],
+    )
 
-        ctx = {
-            "repo_root": str(repo_root),
-            "exp_name": name,
-            "python_bin": args.python_bin,
-            "run_root": str(run_root),
-            "date": datetime.now().strftime("%Y%m%d"),
-        }
-        steps = render_placeholders(steps, ctx)
+    matrix_status = "success"
+    matrix_error = ""
+    try:
+        for exp_index, exp in enumerate(selected_exps, 1):
+            name = exp["name"]
+            method = exp.get("method", "").strip()
+            if method not in builders:
+                raise ValueError(f"Unknown method '{method}' for experiment '{name}'.")
 
-        for step in steps:
-            run_step(step, dry_run=args.dry_run)
+            logger.info(f"[RUN] {name} ({method}) [{exp_index}/{len(selected_exps)}]")
+            logger.event(
+                "experiment_start",
+                experiment=name,
+                method=method,
+                experiment_index=exp_index,
+                total_experiments=len(selected_exps),
+            )
 
-        manifest_path = run_root / name / "manifest.json"
-        ensure_dir(manifest_path.parent)
-        manifest = {
-            "name": name,
-            "method": method,
-            "matrix": str(matrix_path),
-            "created_at": datetime.now().isoformat(timespec="seconds"),
-            "steps": steps,
-            "metadata": metadata,
-            "dry_run": bool(args.dry_run),
-        }
-        manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
-        print(f"[MANIFEST] {manifest_path}")
+            exp_t0 = time.time()
+            steps = []
+            metadata = {}
+            status = "dry_run" if args.dry_run else "success"
+            error = ""
+            step_results = []
 
+            try:
+                steps, metadata = builders[method](repo_root, args.python_bin, global_cfg, exp)
+
+                ctx = {
+                    "repo_root": str(repo_root),
+                    "exp_name": name,
+                    "python_bin": args.python_bin,
+                    "run_root": str(run_root),
+                    "date": datetime.now().strftime("%Y%m%d"),
+                }
+                steps = render_placeholders(steps, ctx)
+
+                for step_index, step in enumerate(steps, 1):
+                    result = run_step(
+                        step,
+                        dry_run=args.dry_run,
+                        logger=logger,
+                        exp_name=name,
+                        exp_index=exp_index,
+                        exp_total=len(selected_exps),
+                        step_index=step_index,
+                        step_total=len(steps),
+                    )
+                    step_results.append(
+                        {
+                            "name": step.get("name", f"step{step_index}"),
+                            "status": result.get("status"),
+                            "returncode": result.get("returncode"),
+                            "duration_sec": result.get("duration_sec"),
+                            "step_log": result.get("step_log", ""),
+                        }
+                    )
+            except Exception as exc:
+                status = "failed"
+                error = repr(exc)
+                matrix_status = "failed"
+                matrix_error = error
+                logger.event("experiment_error", experiment=name, method=method, error=error)
+                raise
+            finally:
+                exp_elapsed = round(time.time() - exp_t0, 3)
+                manifest_path = run_root / name / "manifest.json"
+                ensure_dir(manifest_path.parent)
+                steps_redacted = []
+                for _s in steps:
+                    _item = dict(_s)
+                    _cmd = _item.get("cmd")
+                    if isinstance(_cmd, list):
+                        _item["cmd"] = redact_command(_cmd)
+                    steps_redacted.append(_item)
+
+                manifest = {
+                    "name": name,
+                    "method": method,
+                    "matrix": str(matrix_path),
+                    "created_at": datetime.now().isoformat(timespec="seconds"),
+                    "status": status,
+                    "error": error,
+                    "duration_sec": exp_elapsed,
+                    "steps": steps_redacted,
+                    "step_results": step_results,
+                    "metadata": metadata,
+                    "dry_run": bool(args.dry_run),
+                    "log_dir": str(logger.log_dir),
+                    "run_log": str(logger.text_log),
+                    "events_log": str(logger.events_log),
+                    "experiment_log_dir": str(logger.experiment_log_dir(name)),
+                }
+                manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+                logger.info(f"[MANIFEST] {manifest_path}")
+                logger.event(
+                    "experiment_end",
+                    experiment=name,
+                    method=method,
+                    status=status,
+                    error=error,
+                    duration_sec=exp_elapsed,
+                    manifest=str(manifest_path),
+                )
+    finally:
+        logger.finalize(status=matrix_status, error=matrix_error)
 
 if __name__ == "__main__":
     main()

@@ -1,0 +1,15 @@
+[START] runner=baseline_matrix dry_run=True matrix=D:\研三\毕设\PBR-code\experiments\configs\baseline_unified_matrix.sample.json
+[MATRIX] selected_experiments=1 run_root=D:\研三\毕设\PBR-code\experiments\runs\baselines
+[RUN] naive_rag_local (naive_rag) [1/1]
+[PROGRESS] exp 1/1, step 1/2
+[STEP] retrieval
+[CMD]  C:\Users\huaji\AppData\Local\Programs\Python\Python312\python.exe -m src.retrieval.run_retrieval --in_file D:\研三\毕设\PBR-code\data\longmemeval_data\longmemeval_s_cleaned.json --out_dir D:\研三\毕设\PBR-code\experiments\runs\baselines\naive_rag_local --outfile_prefix naive_rag_local --retriever flat-contriever --granularity session
+[CWD]  D:\研三\毕设\PBR-code
+[STEP-END] retrieval status=dry_run duration=0.001s
+[PROGRESS] exp 1/1, step 2/2
+[STEP] generation
+[CMD]  C:\Users\huaji\AppData\Local\Programs\Python\Python312\python.exe -m src.generation.run_generation --in_file D:\研三\毕设\PBR-code\experiments\runs\baselines\naive_rag_local\naive_rag_local_retrievallog_session_flat-contriever --out_dir D:\研三\毕设\PBR-code\experiments\runs\baselines\naive_rag_local --out_file D:\研三\毕设\PBR-code\experiments\runs\baselines\naive_rag_local\naive_rag_local_hypotheses.jsonl --model_name gpt-4o-mini-2024-07-18 --model_alias gpt4o-mini --openai_key *** --retriever_type flat-session --topk_context 10 --history_format json --useronly false --cot false --con false --merge_key_expansion_into_value none
+[CWD]  D:\研三\毕设\PBR-code
+[STEP-END] generation status=dry_run duration=0.001s
+[MANIFEST] D:\研三\毕设\PBR-code\experiments\runs\baselines\naive_rag_local\manifest.json
+[END] status=success error=
