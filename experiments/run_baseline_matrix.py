@@ -156,6 +156,63 @@ def _local_gen_common(global_cfg, exp_cfg, run_dir, exp_name):
     }
 
 
+def _append_retrieval_eval_step(
+    steps: list,
+    metadata: dict,
+    repo_root: Path,
+    python_bin: str,
+    run_dir: Path,
+    exp_name: str,
+    baseline_type: str,
+    retrieval_output: Path,
+    ref_file: Path,
+    output_prefix: str = "",
+) -> tuple:
+    """
+    为涉及检索的baseline添加检索评估步骤
+    
+    Args:
+        steps: 现有步骤列表
+        metadata: 元数据字典
+        repo_root: 仓库根目录
+        python_bin: Python可执行文件路径
+        run_dir: 运行目录
+        exp_name: 实验名称
+        baseline_type: baseline类型 (naive_rag, dua_rag, afce, pgraphrag等)
+        retrieval_output: 检索结果文件路径
+        ref_file: 参考文件路径（包含ground truth）
+        output_prefix: 输出文件前缀
+    """
+    if not retrieval_output or not retrieval_output.exists():
+        return steps, metadata
+    
+    prefix = output_prefix or f"{exp_name}"
+    metrics_out = run_dir / f"{prefix}_retrieval_metrics.json"
+    detailed_out = run_dir / f"{prefix}_retrieval_detailed.json"
+    
+    eval_cmd = [
+        python_bin,
+        "-m",
+        "experiments.evaluate_retrieval_unified",
+        "--pred_file", str(retrieval_output),
+        "--baseline_type", baseline_type,
+        "--ref_file", str(ref_file),
+        "--output_dir", str(run_dir),
+        "--output_prefix", prefix,
+    ]
+    
+    steps.append({
+        "name": "retrieval_eval",
+        "cmd": eval_cmd,
+        "cwd": str(repo_root),
+    })
+    
+    metadata["retrieval_metrics"] = str(metrics_out)
+    metadata["retrieval_detailed"] = str(detailed_out)
+    
+    return steps, metadata
+
+
 def build_naive_rag_steps(repo_root, python_bin, global_cfg, exp):
     exp_name = exp["name"]
     cfg = exp.get("args", {})
@@ -262,6 +319,21 @@ def build_naive_rag_steps(repo_root, python_bin, global_cfg, exp):
         "retrieval_output": retrieval_out,
         "generation_output": gen["out_file"],
     }
+    
+    ref_file = Path(cfg.get("ref_json", global_cfg.get("ref_json", in_file))).resolve()
+    steps, metadata = _append_retrieval_eval_step(
+        steps=steps,
+        metadata=metadata,
+        repo_root=repo_root,
+        python_bin=python_bin,
+        run_dir=run_dir,
+        exp_name=exp_name,
+        baseline_type="naive_rag",
+        retrieval_output=Path(retrieval_out),
+        ref_file=ref_file,
+        output_prefix=outfile_prefix,
+    )
+    
     return steps, metadata
 
 
@@ -473,6 +545,23 @@ def build_pgraphrag_steps(repo_root, python_bin, global_cfg, exp):
         pred_file_hint=pred_file_hint,
         extra_adapter_args=adapter_extra if adapter_extra else None,
     )
+    
+    ref_json = cfg.get("ref_json", global_cfg.get("ref_json", ""))
+    if ref_json and input_path:
+        ref_path = Path(ref_json).resolve()
+        steps, metadata = _append_retrieval_eval_step(
+            steps=steps,
+            metadata=metadata,
+            repo_root=repo_root,
+            python_bin=python_bin,
+            run_dir=run_dir,
+            exp_name=exp_name,
+            baseline_type="pgraphrag",
+            retrieval_output=input_path,
+            ref_file=ref_path,
+            output_prefix=f"{exp_name}_retrieval",
+        )
+    
     return steps, metadata
 
 
@@ -523,6 +612,26 @@ def build_afce_steps(repo_root, python_bin, global_cfg, exp):
         pred_file_hint=None,
         extra_adapter_args=adapter_extra,
     )
+    
+    ref_json = cfg.get("ref_json", global_cfg.get("ref_json", ""))
+    if ref_json:
+        ref_path = Path(ref_json).resolve()
+        pred_dir = repo / "AP_Bots" / "files" / "preds"
+        pred_files = sorted(pred_dir.glob(f"{dataset}*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if pred_files:
+            steps, metadata = _append_retrieval_eval_step(
+                steps=steps,
+                metadata=metadata,
+                repo_root=repo_root,
+                python_bin=python_bin,
+                run_dir=run_dir,
+                exp_name=exp_name,
+                baseline_type="afce",
+                retrieval_output=pred_files[0],
+                ref_file=ref_path,
+                output_prefix=f"{exp_name}_retrieval",
+            )
+    
     return steps, metadata
 
 

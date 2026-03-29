@@ -1,4 +1,4 @@
-﻿import argparse
+import argparse
 import json
 from glob import glob
 from pathlib import Path

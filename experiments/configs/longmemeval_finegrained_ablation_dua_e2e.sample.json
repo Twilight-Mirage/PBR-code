@@ -1,4 +1,4 @@
-﻿{
+{
   "global": {
     "run_root": "./experiments/runs/dua_finegrained_ablation",
     "in_file": "./data/longmemeval_data/longmemeval_s_cleaned.json",

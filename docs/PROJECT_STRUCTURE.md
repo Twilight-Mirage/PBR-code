@@ -1,4 +1,4 @@
-﻿# Project Structure for Fast Comparative Experiments
+# Project Structure for Fast Comparative Experiments
 
 ## Current convention
 

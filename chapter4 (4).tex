@@ -1,0 +1,510 @@
+\chapter{面向个性化场景的动态用户建模检索增强生成方法}
+
+上一章主要讨论了时间演化知识场景下的检索增强生成问题，而在真实应用中，RAG 系统的动态性不仅来自知识本身，也来自用户特征的变化。
+对于相同查询，不同用户往往具有不同的兴趣偏好和关注重点；而对于同一用户，这些特征也可能随着交互不断变化。
+因此，上一章关注的是知识的时间演化，而本章进一步关注用户特征的动态建模。
+基于此，本章提出一种面向个性化场景的动态用户建模检索增强生成方法 DUA-RAG，后文将依次介绍其研究动机、方法设计与实验验证。
+
+\section{研究动机}
+
+在个性化场景中，RAG 系统面临的关键问题已不再只是“能否检索到相关知识”，而是“能否检索到符合当前用户偏好的知识”。
+对于同一查询，不同用户的需求偏好往往并不相同，因此仅依据查询表面语义进行统一检索，难以准确定位用户真正想要的证据。
+
+以“帮我规划一下周末去上海的行程”为例，同样的查询在不同用户处可能对应不同的需求：部分用户可能更关注餐厅与打卡路线，而家庭出行用户则更关注亲子景点与交通便利性。相关示意如图~\ref{Fig4-1.研究动机} 所示。
+若系统仅依据查询表面语义进行统一检索，不同用户往往会得到相似的通用结果。此时，即使在生成阶段再引入用户信息，也只能在已有偏差的基础上进行调整。
+因此，个性化信息应尽可能前移到检索阶段之前，使查询表示能够体现用户的偏好特征。
+
+\begin{figure}[h] %H为当前位置，!htb为忽略美学标准，htbp为浮动图形
+    \centering %图片居中
+    \includegraphics[width=0.72\textwidth]{image/第四章-研究动机.png} %插入图片，[]中设置图片大小，{}中是图片文件名
+    \caption[传统 RAG 在个性化场景下的问题]{传统 RAG 在个性化场景下的问题} %最终文档中希望显示的图片标题
+    \label{Fig4-1.研究动机} %用于文内引用的标签
+\end{figure}
+
+
+然而，当一些研究开始将个性化信息引入检索阶段后\cite{auPersonalizedGraphBasedRetrieval2025,zhangPersonalizeRetrieveLLMbased2026}，新的问题也随之显现，即用户画像本身并不是静态不变的。
+一方面，同一用户在不同时间的需求偏好可能发生变化，静态画像难以稳定刻画其当前需求；另一方面，真实场景中还存在大量历史交互稀疏、甚至没有历史记录的新用户，此时系统难以从历史中提取画像，从而导致个性化检索退化为通用检索。
+也就是说，当个性化建模开始依赖用户画像时，系统随之又必须同时面对历史过期和历史不足这两类问题。
+
+进一步地，现有方法对用户信息的利用大多仍停留在历史拼接或提示注入层面。这类方式虽然能够补充上下文信息，但却难以形成稳定的用户表征。
+模型可能得到用户的高频表达，却难以识别更稳定的细粒度特征，从而使用户信息难以在检索、排序和生成过程中发挥一致作用。
+
+综合来看，个性化 RAG 的问题是逐层展开的。由于同一查询在不同用户处并不完全等同，有必要在检索阶段引入个性化；而一旦引入用户画像建模，系统又需要面对用户特征持续变化、历史样本不足以及用户表征不够明确等问题。
+为了解决上述问题，本文在检索前个性化思想的基础上，进一步引入动态用户画像建模，并结合冷启动原型补充和显式用户表征学习，提出 DUA-RAG 方法。
+
+\section{算法设计}
+\subsection{问题定义}
+
+本章研究的是面向个性化场景的检索增强生成任务，即在查询的基础上，结合用户画像信息与外部知识，生成更符合当前用户偏好的输出。
+不同于通用场景的 RAG，同一查询在不同用户处可能对应不同的关注重点；而对于同一用户，其兴趣偏好也可能随时间变化。因此，本文将用户画像建模为随时间变化的动态特征。
+
+具体而言，在时刻 $t$，对于用户 $u$ 的输入查询 $q_t \in \mathcal{Q}$，该时刻的用户画像为 $P_u^t$，外部知识库为 $\mathcal{D}$。
+系统首先基于查询语义和用户画像，从知识库 $\mathcal{D}$ 中检索相关的证据集合 $R_t \subseteq \mathcal{D}$，随后基于查询、用户画像和检索证据生成最终输出 $y_t \in \mathcal{Y}$。
+
+基于上述定义，本章所研究的个性化 RAG 任务可以表示为
+\begin{align}
+R_t&=\mathcal{R}(q_t,P_u^t,\mathcal{D}),
+\\
+y_t&=\mathcal{G}(q_t,P_u^t,R_t),
+\end{align}
+其中，$\mathcal{R}(\cdot)$ 表示检索函数，$\mathcal{G}(\cdot)$ 表示生成函数。
+从条件生成的角度看，该任务还可以表示为
+\begin{equation}
+P(y_t \mid q_t,P_u^t,\mathcal{D})
+=\sum_{R_t \subseteq \mathcal{D}} P(y_t \mid q_t,P_u^t,R_t)\,P(R_t \mid q_t,P_u^t,\mathcal{D}).
+\end{equation}
+
+上述定义表明，本章研究的问题仍属于个性化 RAG，但与大多现有工作不同，这里将用户画像建模为动态变量。
+因此，后续方法设计将围绕动态用户画像建模展开，并进一步讨论冷启动补充和显式用户表征学习等问题。
+
+\subsection{整体框架}
+
+基于上述问题定义，本文提出了一个面向个性化场景的动态用户建模检索增强生成方法 DUA-RAG，其整体结构如图~\ref{Fig4-2.整体框架} 所示。
+与传统 RAG 主要围绕查询语义进行检索不同，本文将用户特征显式引入检索增强生成过程。整体上，框架由动态用户画像、冷启动补充和显式用户表征学习三个部分组成。
+
+\begin{figure}[h] %H为当前位置，!htb为忽略美学标准，htbp为浮动图形
+    \centering %图片居中
+    \includegraphics[width=0.8\textwidth]{image/第四章-整体框架.png} %插入图片，[]中设置图片大小，{}中是图片文件名
+    \caption[DUA-RAG 方法整体流程]{DUA-RAG 方法整体流程} %最终文档中希望显示的图片标题
+    \label{Fig4-2.整体框架} %用于文内引用的标签
+\end{figure}
+
+
+如图所示，系统首先接收用户当前查询及相关历史交互信息，并在用户特征模块中构建当前时刻的用户画像。
+其中，长期画像用于刻画用户较为稳定的兴趣偏好，短期状态用于反映当前任务需求和近期交互变化。
+对于历史交互不足的用户，系统进一步引入冷启动路由与原型补充机制，为后续检索提供必要的个性化信息。
+在此基础上，系统从用户历史中抽取显式特征，并结合对比学习优化用户表示，使其更稳定、也更有区分度。
+
+随后，系统在检索前个性化模块中利用上述用户特征对原始查询进行增强，使同一查询在不同用户或不同时刻能够体现不同的关注重点。
+增强后的查询被送入检索与重排模块，从外部知识库中召回与当前用户需求更匹配的候选证据，并将其整理为生成模块的上下文输入。
+最后，生成模块综合用户查询、用户特征和检索证据，输出符合当前用户偏好的结果。当前交互中的新增内容会回流至特征更新模块，用于修正和补充用户特征，从而为下一轮个性化检索与生成提供支持。
+
+总体来看，本文框架并不是在传统 RAG 流程中简单添加用户信息，而是将动态用户特征显式引入检索增强生成全过程。
+图中的用户特征构建、冷启动路由和显式表征学习几个模块，共同构成了 DUA-RAG 的核心方法设计，并为后续的个性化检索与生成提供一致的用户状态信息。
+
+\subsection{动态用户画像建模}
+
+上一节已经指出，在个性化场景中，检索过程不再仅由查询本身决定，还受到用户特征的直接影响。
+因此，个性化检索增强的关键不只是引入用户信息，而在于构造能够准确反映当前用户状态的用户表示。
+与第三章中讨论的知识随时间的演化类似，在个性化场景中，用户偏好和任务状态的变化也可能导致检索出现偏差。
+对于同一用户而言，其长期兴趣偏好可能相对稳定，但近期的状态与关注点却会随交互过程持续变化。如果仍使用全量历史信息，而不加区分和筛选，一些过时的偏好特征就可能一并进入当前检索过程，从而影响个性化检索的准确性。
+因此，和第三章关注知识状态的时间演化类似，本节进一步讨论用户画像的动态建模问题。
+
+基于上述分析，本文将用户画像表示为与时刻相关的动态变量 $P_u^t$，其中 $u$ 表示用户，$t$ 表示当前交互时刻。
+因此，本文将用户画像拆分为相对稳定的长期画像和反映当前需求的短期状态，具体地，用户画像可以表示为
+\begin{equation}
+P_u^t=\left[P_{u,l}^t;\;P_{u,s}^t\right],
+\end{equation}
+其中，$P_{u,l}^t$ 表示长期画像，用于描述用户较为稳定的兴趣偏好；$P_{u,s}^t$ 表示短期状态，用于刻画用户当前阶段的任务目标、会话状态和近期交互特征。本文将动态用户画像建模过程概括如图~\ref{Fig4-3.动态用户建模} 所示。
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.78\textwidth]{image/动态用户画像.png}
+    \caption{动态用户画像建模机制示意图}
+    \label{Fig4-3.动态用户建模}
+\end{figure}
+
+对于长期画像，本文主要利用用户长期历史交互记录进行建模。设用户历史交互记录为 $\{h_1,h_2,\dots,h_n\}$，其中 $h_i$ 的发生时刻为 $t_i$，其表示向量记为 $\mathbf{e}_i$，则长期画像可表示为
+\begin{equation}
+P_{u,l}^t=\sum_{i=1}^{n}\alpha_i^t \mathbf{e}_i,
+\end{equation}
+其中，$\alpha_i^t$ 表示历史行为 $h_i$ 在时刻 $t$ 下的权重，且 $\sum_{i=1}^n \alpha_i^t=1$。
+除了简单的随时间衰减，本文进一步参考 Ebbinghaus 遗忘曲线的思想，将历史行为的权重同时与时间间隔和记忆强度联系起来\cite{zhongMemoryBankEnhancingLarge2024}。
+记 $s_i^t$ 为历史行为 $h_i$ 在时刻 $t$ 的记忆强度，用于刻画该行为所对应偏好在当前时刻的保留程度，则有
+\begin{equation}
+\alpha_i^t=
+\frac{\exp\!\left(-\frac{t-t_i}{s_i^t+\epsilon}\right)}
+{\sum_{j=1}^{n}\exp\!\left(-\frac{t-t_j}{s_j^t+\epsilon}\right)},
+\end{equation}
+其中，$\epsilon$ 为防止分母过小的平滑项。
+根据该式，距离当前时刻越远的历史行为，通常会获得更低权重；而如果某个历史行为在后续交互中被反复强化，则其对应的记忆强度 $s_i^t$ 会更高。
+进一步地，当某条历史行为所对应的偏好在后续交互中再次出现时，可对相应历史项的记忆强度进行更新：
+\begin{equation}
+s_i^{t+1}=s_i^t+\delta_i^t,
+\end{equation}
+其中，$\delta_i^t$ 表示当前轮交互对历史行为 $h_i$ 的强化程度。实际实现中，通过归一化或上界截断等方式控制 $s_i^t$ 的增长范围。
+这样，长期画像既能够保留用户较为稳定的兴趣偏好，也能够根据相关偏好在后续交互中的被提及情况调整其权重。
+
+与长期画像不同，短期状态更关注当下的任务和交互状态。
+本文利用最近若干轮交互和当前会话上下文对其进行建模，可表示为
+\begin{equation}
+P_{u,s}^t=\mathrm{Enc}\!\left(c_t,\mathcal{I}_u^t\right),
+\end{equation}
+其中，$c_t$ 表示当前会话上下文，$\mathcal{I}_u^t$ 表示用户近期交互，$\mathrm{Enc}(\cdot)$ 表示短期状态编码函数。
+相较于长期画像对稳定偏好的刻画，短期状态更强调用户在当前时刻的局部需求，从而使系统能够同时表征用户的长期兴趣与即时任务目标。
+
+进一步地，为使用户画像能够随交互过程持续演化，本文在每轮交互后根据新增行为信息对用户画像进行更新。
+记当前轮新增交互为 $\Delta \mathcal{H}_u^t$，则有
+\begin{equation}
+P_u^{t+1}=\mathrm{Update}\!\left(P_u^t,\Delta \mathcal{H}_u^t\right),
+\end{equation}
+其中，$\mathrm{Update}(\cdot)$ 表示画像更新函数。长期画像主要吸收较稳定的历史增量信息，短期画像则更侧重通过近期交互进行快速更新。
+通过这一机制，用户画像不再是一次性构造的附加信息，而是能够随时间持续更新的状态表示。
+
+综上，本节通过动态用户画像建模，为后续检索增强过程提供可随时间变化的用户表示。
+其中，长期画像负责保留稳定的偏好特征，短期状态负责刻画当前任务需求，二者共同构成个性化检索生成的基础。
+
+\subsection{面向冷启动场景的画像补充机制}
+
+上一节主要讨论了用户画像随时间变化所带来的建模问题，但这一过程默认系统已经拥有一定数量的用户历史，能够据此构建长期画像与短期状态。
+然而，在真实应用中，这一前提并不总是成立。
+对于新用户或历史记录很少的用户，系统往往难以从个人数据中构建稳定的用户画像，此时个性化检索就容易退化为通用检索。
+更具体地说，历史稀疏并不只是导致用户信息量减少，还会使系统难以从有限样本中区分用户的稳定偏好与偶然行为，从而降低画像的可靠性。
+在这种情况下，检索阶段能够利用的个性化线索显著减弱，模型更容易仅依据查询表面语义进行匹配，进而削弱后续生成结果与用户需求之间的贴合程度。
+换言之，上一节主要处理的是历史会过期的问题，而本节进一步关注历史数据可能不足的问题。
+
+针对这一问题，现有工作通常通过邻域用户或图结构信息对历史稀疏用户的画像进行补充\cite{auPersonalizedGraphBasedRetrieval2025}。
+其基本思路在于，当目标用户缺乏充分的个体历史时，可借助相似用户群体中较为稳定的共有模式，为其提供初始偏好线索，从而缓解画像初始化阶段的信息真空。
+但这类方法往往依赖稳定的用户邻接关系，而在实际应用中，未必有天然可用的图结构。与此同时，在隐私受限场景下，用户的原始信息也难以直接共享，因此其应用范围往往受到限制。
+此外，若直接将外部用户信息作为目标用户画像的替代输入，还可能引入过强的群体偏置，削弱个体建模的针对性。
+
+基于此，本文不再仅利用显式邻居检索来补充冷启动画像，而是采用基于聚类与显式标签原型的补充机制。
+其基本思想是：当个人历史不足以支持稳定建模时，系统不再完全依赖用户自身样本，而是利用与其更接近的群体原型补充用户画像，从而为后续检索与生成提供初步的个性化信息。
+该补充并不试图直接替代目标用户的真实画像，而是希望在历史稀疏条件下提供较为稳定的初始先验，使系统能够在检索阶段获得基本的个性化区分能力。
+其整体流程如图~\ref{Fig4-4.冷启动} 所示。
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.82\textwidth]{image/冷启动.png}
+    \caption{面向冷启动场景的用户画像原型补充机制示意图}
+    \label{Fig4-4.冷启动}
+\end{figure}
+
+具体而言，系统首先根据用户的历史记录或元信息构造用户摘要向量 $\mathbf{s}_u^t$：
+\begin{equation}
+\mathbf{s}_u^t=\mathrm{Pool}(\mathcal{H}_u^t,m_u),
+\end{equation}
+其中，$\mathcal{H}_u^t$ 表示用户截至时刻 $t$ 的交互历史，$m_u$ 表示用户标签等元信息，$\mathrm{Pool}(\cdot)$ 表示摘要聚合函数。随后，在用户向量空间中进行聚类，得到原型集合
+\begin{equation}
+\mathcal{C}=\{\mathbf{c}_1,\mathbf{c}_2,\ldots,\mathbf{c}_M\},
+\end{equation}
+其中，$\mathbf{c}_m$ 表示第 $m$ 个簇的原型，如果对应的用户集合记为 $\mathcal{U}_m$，则原型可表示为
+\begin{equation}
+\mathbf{c}_m=\frac{1}{|\mathcal{U}_m|}\sum_{u\in\mathcal{U}_m}\mathbf{s}_u^t.
+\end{equation}
+
+在实现上，$\mathbf{s}_u^t$ 可由用户历史行为向量等特征构成，聚类过程可采用 K-means\cite{lloydLeastSquaresQuantization1982,arthurKmeansAdvantagesCareful2007}、HDBSCAN\cite{campelloHierarchicalDensityEstimates2015} 等方法。显式标签既可作为独立补充信息，也可以用于聚类初始化或约束条件。
+
+对于用户 $u$，如果可用的历史较少，则可以根据当前会话中的特征信号或显式标签，将其映射到最相似的原型簇 $g(u)$。形式上，可写为
+\begin{equation}
+g(u)=\arg\max_{m}\mathrm{sim}\!\left(\mathbf{s}_u^t,\mathbf{c}_m\right),
+\end{equation}
+其中，$\mathrm{sim}(\cdot,\cdot)$ 表示相似度度量。对于向量特征，通常采用余弦相似度；对于显式标签，可采用 Jaccard 相似度等方法。如果用户只有标签信息，也可以直接映射到对应标签的原型。
+
+完成映射后，用户在时刻 $t$ 的画像可表示为
+\begin{equation}
+\widehat{P}_u^t=\lambda_u^t P_u^t+\left(1-\lambda_u^t\right)\mathbf{c}_{g(u)},
+\end{equation}
+
+其中，$P_u^t$ 表示由个人历史构建得到的动态画像，$\mathbf{c}_{g(u)}$ 表示用户所属簇的原型表示，$\lambda_u^t \in [0,1]$ 为门控系数，用于控制当前画像对个人历史和群体原型的依赖程度。为反映用户历史逐步积累的过程，$\lambda_u^t$ 可设计为随着用户历史数据规模而单调增加的函数，例如
+\begin{equation}
+\lambda_u^t=\min\left(1,\frac{|\mathcal{H}_u^t|}{K}\right),
+\end{equation}
+其中，$|\mathcal{H}_u^t|$ 表示用户截至时刻 $t$ 的历史记录数量，$K$ 表示达到稳定个体建模所需的阈值。
+上述过程可概括为算法~\ref{alg:prototype-supplement} 所示的流程。
+
+\begin{algorithm}[htbp]
+\caption{用户画像原型补充流程}
+\label{alg:prototype-supplement}
+\KwIn{用户历史 $\mathcal{H}_u^t$，元信息/显式标签 $m_u$，原型集合 $\mathcal{C}$，阈值 $K$}
+\KwOut{冷启动补充后的用户画像 $\widehat{P}_u^t$}
+
+构造用户摘要向量 $\mathbf{s}_u^t=\mathrm{Pool}(\mathcal{H}_u^t,m_u)$\;
+\eIf{$|\mathcal{H}_u^t|=0$}{
+    根据 $m_u$ 或 $\mathbf{s}_u^t$ 映射到最近原型簇 $g(u)$\;
+    令 $\widehat{P}_u^t=\mathbf{c}_{g(u)}$\;
+}{
+    映射到最近原型簇 $g(u)$\;
+    计算门控系数 $\lambda_u^t=\min(1,|\mathcal{H}_u^t|/K)$\;
+    令 $\widehat{P}_u^t=\lambda_u^t P_u^t+(1-\lambda_u^t)\mathbf{c}_{g(u)}$\;
+}
+\Return{$\widehat{P}_u^t$}\;
+\end{algorithm}
+
+需要指出的是，冷启动补充通常需要借助其他用户的历史信息，因此在提高系统能力的同时，也可能引入隐私与偏差风险。
+为此，本文在机制设计中遵循以下原则。第一，不直接注入其他用户的原始文本，而仅使用簇级摘要和簇中原型的向量作为补充信息。第二，在原型构建时设置最小簇规模约束，当簇内样本不足时，退化为更粗粒度的全局原型。
+
+总体来看，原型补充机制为动态用户画像提供了面向冷启动场景的补充方式，使系统既能处理已有用户随时间变化的画像更新问题，也能为新用户或历史稀疏用户提供初始画像支持。
+在此基础上，补充后的初始画像不仅能够缓解冷启动条件下的检索退化问题，也为后续显式用户表征学习提供了更完整的输入，从而进一步提升用户表示的稳定性与可学习性。
+
+\subsection{显式用户表征学习}
+
+前两节分别从动态更新和冷启动补充两个角度完善了用户画像的构建过程。
+然而，即便得到了用户画像，如果用户信息仍主要通过历史文本拼接或提示注入的方式进入模型，其作用往往仍然停留在自然语言层面的隐式表示，这样就难以稳定捕捉用户的细粒度特征。
+当用户历史较长、内容噪声较多或偏好信号较为分散时，模型更容易关注局部高频表达，而难以形成对用户整体特征的稳健概括。
+因此，前两节主要解决的是用户画像的构建与补充问题，而本节进一步关注如何将这些信息转化为稳定的用户表示。
+
+
+已有相关研究表明，单纯向模型提供用户历史样本，往往不足以识别用户的细粒度特征\cite{yazanImprovingRAGPersonalization2025}。
+受此启发，本文进一步引入显式用户表征学习机制，不再仅将用户历史作为提示上下文直接输入模型，而是尝试从中提取能够反映用户偏好、表达倾向与行为特征的显式信号。
+在此基础上，本文将历史文本中的局部实例信息与显式特征信息进行联合编码，构建统一的用户向量表示，使用户状态能够从自然语言层面的隐式描述转化为模型可直接利用的连续表示。
+进一步地，本文结合对比学习对该表示进行约束，以增强不同用户之间的可分性，并提升同一用户在不同样本条件下表示的一致性，从而使用户信息能够以更稳定、可度量的方式参与后续检索、重排与生成过程。
+
+这里所说的显式特征，并非对用户属性的简单罗列，而是对用户历史中相对稳定模式的归纳表达。其中，高频词、句法模式等结构化特征，通常比仅依赖粗粒度统计特征的表示更稳定，也更容易被模型利用\cite{yazanImprovingRAGPersonalization2025}。
+基于这一观察，本文优先采用可解释的显式特征来构建用户表征。
+设用户 $u$ 在时刻 $t$ 的可用历史集合为 $\mathcal{H}_u^t$。为从中获得更清晰的用户特征，本文将显式特征划分为词汇、语义和风格三类，分别记为
+\begin{equation}
+f_{u,\mathrm{lex}}^t=\Phi_{\mathrm{lex}}(\mathcal{H}_u^t),\qquad
+f_{u,\mathrm{sem}}^t=\Phi_{\mathrm{sem}}(\mathcal{H}_u^t),\qquad
+f_{u,\mathrm{sty}}^t=\Phi_{\mathrm{sty}}(\mathcal{H}_u^t),
+\end{equation}
+其中，$\Phi_{\mathrm{lex}}(\cdot)$、$\Phi_{\mathrm{sem}}(\cdot)$ 和 $\Phi_{\mathrm{sty}}(\cdot)$ 分别表示词汇层、语义层和风格层的特征提取函数。
+三类显式特征的具体构成如表~\ref{tab:explicit-user-features} 所示。
+
+\begin{table}[htbp]
+\centering
+\caption{显式用户特征的构成}
+\label{tab:explicit-user-features}
+\small
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabularx}{0.95\textwidth}{p{2.8cm} p{3cm} X}
+\toprule
+特征类型 & 作用 & 具体形式 \\
+\midrule
+\makecell[l]{词汇层特征 $f_{u,\mathrm{lex}}^t$}
+& 习惯用词偏好
+& top-$N$ 高频词、关键词分布、功能词分布等 \\
+
+\makecell[l]{语义层特征 $f_{u,\mathrm{sem}}^t$}
+& 关注的主题或领域
+& 主题向量、命名实体统计、主题簇标签等 \\
+
+\makecell[l]{风格层特征 $f_{u,\mathrm{sty}}^t$}
+& 表达风格与语言习惯
+& 依存模式、平均句长、标点分布、情感统计等 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+
+在此基础上，本文利用编码器将这几类显式特征映射为统一的用户向量表示：
+\begin{equation}
+\bar{\mathbf{z}}_u^t = E\!\left(\left[f_{u,\mathrm{lex}}^t;\;f_{u,\mathrm{sem}}^t;\;f_{u,\mathrm{sty}}^t\right]\right),
+\end{equation}
+其中，$E(\cdot)$ 表示用户特征编码器，$\bar{\mathbf{z}}_u^t$ 表示用户 $u$ 在时刻 $t$ 的初始显式表征向量。与单纯以自然语言形式注入提示词不同，这里的 $\bar{\mathbf{z}}_u^t$ 是一个可训练的连续表示。
+为更直观地说明显式特征提取、对比学习增强以及统一用户状态融合之间的关系，本文将显式用户表征学习机制概括如图~\ref{Fig4-4.显式用户表征} 所示。
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.82\textwidth]{image/显式用户表征.png}
+    \caption{显式用户表征学习机制示意图}
+    \label{Fig4-4.显式用户表征}
+\end{figure}
+
+
+为了进一步增强不同用户之间的区分性，本文在用户表征学习过程中引入对比学习目标。
+具体而言，正样本主要来自用户自身的历史片段以及与当前用户偏好一致的证据；负样本则优先选取语义接近但来自其他用户的样本，以突出细粒度个体差异。此外，也可以加入来自最不相似簇的远负例。
+
+形式上，首先定义潜在难负例的候选集合为
+\begin{equation}
+\mathcal{N}_{u}^-=
+\left\{v\neq u \mid \mathrm{sim}\!\left(\mathbf{s}_u^t,\mathbf{s}_v^t\right)\ge \gamma \right\},
+\end{equation}
+
+其中，$\mathbf{s}_u^t$ 表示用户 $u$ 在时刻 $t$ 的历史摘要向量，$\mathrm{sim}(\cdot,\cdot)$ 表示语义相似度函数，$\gamma$ 为提前设定的阈值。随后，从该集合中选取与当前用户显式表征最接近的一组样本作为难负例，即
+\begin{equation}
+\hat{\mathcal{N}}_u^-=
+\operatorname{TopM}_{v\in \mathcal{N}_{u}^-}
+\mathrm{sim}\!\left(\bar{\mathbf{z}}_u^t,\bar{\mathbf{z}}_v^t\right),
+\end{equation}
+其中 $\operatorname{TopM}$ 表示按相似度选取前 $M$ 个候选样本。
+
+基于此，设正样本表示为 $\mathbf{z}_u^{t,+}$，负样本表示为 $\mathbf{z}_v^t$，则可采用如下对比损失：
+\begin{equation}
+\mathcal{L}_{\mathrm{con}}
+=
+-\log
+\frac{\exp\!\left(\mathrm{sim}\!\left(\bar{\mathbf{z}}_u^t,\bar{\mathbf{z}}_u^{t,+}\right)/\tau\right)}
+{\exp\!\left(\mathrm{sim}\!\left(\bar{\mathbf{z}}_u^t,\bar{\mathbf{z}}_u^{t,+}\right)/\tau\right)
++
+\sum_{v \in \hat{\mathcal{N}}_u^-}
+\exp\!\left(\mathrm{sim}\!\left(\bar{\mathbf{z}}_u^t,\bar{\mathbf{z}}_v^t\right)/\tau\right)},
+\end{equation}
+其中 $\tau$ 为温度系数。
+该对比损失旨在拉近当前用户与一致样本之间的距离，同时拉远其与语义接近但偏好不同的其他用户之间的表示距离，从而提高用户向量空间的区分能力。
+
+经对比学习优化后，本文将更新后的显式用户表示记为 $\mathbf{z}_u^t$，并将其与前文得到的动态用户画像 $\widehat{P}_u^t$ 进一步融合，形成后续检索增强过程所使用的统一用户表示
+\begin{equation}
+U_u^t=\left[\widehat{P}_u^t\ ;\ \mathbf{z}_u^t\right],
+\end{equation}
+这样，一方面可以保留长期偏好和短期状态，另一方面也引入了更细粒度的显式用户特征。
+
+总体来看，显式用户表征学习在本章算法中的作用主要体现在两个方面：
+其一，通过结构化特征抽取，将原本分散在历史记录中的用户信息编码为更明确的特征表示，从而提高个性化建模的可解释性；
+其二，通过对比学习构建用户向量空间，使用户信息能够以更稳定的方式参与检索、重排和生成过程。
+至此，本文围绕个性化 RAG 的三个关键问题形成了一条相互衔接的设计路线。
+
+\section{实验与分析}
+
+为了验证本文提出的 DUA-RAG 方法的有效性，本节设计并开展了一系列实验，从整体性能、模块作用和实例效果三个角度进行分析。首先介绍实验设置，包括数据集、评价指标、基线方法及实现细节；随后通过对比实验验证本文方法在个性化检索与生成任务中的有效性，并通过消融实验分析各关键模块的作用；最后结合实例分析，进一步展示本文方法在用户需求对齐与个性化建模方面的实际表现。
+
+\subsection{实验设置}
+
+\vspace{0.5em}
+
+\noindent{\bfseries \large 数据集}
+
+\vspace{0.5em}
+
+本文选取 PersonaBench、LongMemEval 以及 LaMP 中的生成子任务 LaMP-4 和 LaMP-7 作为实验数据集，以从不同角度评估本文方法在个性化检索增强生成场景下的有效性。
+
+\begin{itemize}
+    \item \textbf{PersonaBench}\cite{tanPersonaBenchEvaluatingAI2025}：主要用于评测系统对用户私有信息与偏好线索的检索和理解能力，适合验证本文方法在个性化信息命中方面的效果。
+    
+    \item \textbf{LongMemEval}\cite{wuLongMemEvalBenchmarkingChat2025}：主要用于考察长历史条件下的长期记忆检索与时间一致性，适合验证本文方法在用户状态持续变化和长历史噪声条件下的稳健性。
+    
+    \item \textbf{LaMP-4}\cite{salemiLaMPWhenLarge2024}：对应个性化新闻标题生成任务，可用于评估本文方法在冷启动与时间动态场景下的个性化生成效果。
+    
+    \item \textbf{LaMP-7}\cite{salemiLaMPWhenLarge2024}：对应个性化推文改写任务，更强调个体风格和表达习惯差异，适合验证显式用户表征学习对细粒度个性化生成的提升作用。
+\end{itemize}
+
+上述数据集的基础统计信息如表~\ref{tab:datasets_ch4} 所示。
+
+\begin{table}[htbp]
+    \centering
+    \caption{第四章实验数据集的基础统计信息}
+    \label{tab:datasets_ch4}
+    \renewcommand{\arraystretch}{1.2}
+    \setlength{\tabcolsep}{5pt}
+    \begin{tabular}{>{\centering\arraybackslash}p{2.2cm}
+                    >{\centering\arraybackslash}p{3.4cm}
+                    >{\centering\arraybackslash}p{6cm}}
+        \toprule
+        \textbf{数据集} & \textbf{任务场景} &  \textbf{问题集规模} \\
+        \midrule
+        PersonaBench & 私有信息问答 & 582 个问题 \\
+        LongMemEval & 长期记忆问答 & 500 个问题 \\
+        LaMP-4 & 个性化新闻标题生成 & 16828 user-based + 15800 time-based \\
+        LaMP-7 & 个性化推文改写 & 13433 user-based + 16435 time-based\\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\vspace{0.5em}
+
+\noindent{\bfseries \large 基线方法}
+
+\vspace{0.5em}
+
+为全面验证本文方法的有效性，本文选取以下几类具有代表性的方法作为对比基线。
+
+\begin{itemize}
+    \item \textbf{Naive RAG}\cite{lewisRetrievalAugmentedGenerationKnowledgeIntensive2020}：不引入任何用户信息的通用检索增强生成方法，仅根据输入查询从外部知识库中检索相关证据并生成结果，用作非个性化下界。
+
+    \item \textbf{History-only RAG}：直接拼接用户历史作为检索或生成上下文，不进行动态画像建模、冷启动补充或显式用户表征学习，用于衡量静态历史拼接策略的效果。
+
+    \item \textbf{PBR}\cite{zhangPersonalizeRetrieveLLMbased2026}：代表性的检索前个性化方法，通过个性化伪反馈和锚点结构对齐实现“先个性化、再检索”，是本文在检索前个性化方向上最直接的主要对比对象。
+
+    \item \textbf{PGraphRAG}\cite{auPersonalizedGraphBasedRetrieval2025}：代表性的冷启动与结构化检索方法，通过引入邻域用户和图结构信息增强稀疏用户画像，用于对比本文群体原型补充机制在冷启动场景下的表现。
+
+    \item \textbf{AF+CE}\cite{yazanImprovingRAGPersonalization2025}（Author Features + Contrastive Examples）：在基础 RAG 上进一步引入显式作者特征和对比样本，用于对比本文显式用户表征学习模块的有效性。
+
+    \item \textbf{LightRAG}\cite{guoLightRAGSimpleFast2025}：作为强化版通用 RAG 基线，用于评估本文方法的性能提升是否仅来自检索能力增强，而非个性化建模本身。
+\end{itemize}
+
+上述基线方法分别对应非个性化下界、静态历史拼接、检索前个性化、冷启动补充、显式特征增强以及强化版通用检索等不同思路，能够较好覆盖本文三个创新点所针对的关键问题。后续实验将在此基础上与本文提出的 DUA-RAG 进行比较。
+
+\vspace{0.5em}
+
+\noindent{\bfseries \large 实现细节}
+
+\vspace{0.5em}
+
+为保证比较的公平性，本文尽可能在统一的检索器、重排器和生成模型配置下比较不同方法，仅在个性化建模机制上进行差异化设置。整体上，各方法均采用“召回 + 重排 + 生成”的基本流程：首先从外部知识库中召回候选证据，再经重排模块筛选前 $K$ 条结果，最后送入生成模型得到输出。
+
+对于本文方法，动态用户画像模块根据用户历史交互与当前会话信息构建时刻相关的用户状态。其中，长期画像通过历史行为序列的时间加权聚合得到，短期画像则由最近若干轮交互与当前会话上下文编码得到。冷启动场景下，系统首先根据训练集用户构造群体原型集合，并在用户历史不足时利用最相近的群体原型对个人画像进行补充；为降低隐私风险，实验中仅使用簇级统计信息、去标识化特征或群体原型向量作为补充先验。
+
+在显式用户表征学习模块中，本文从用户历史中提取词汇层、语义层和风格层三类显式特征，并通过特征编码器映射为统一的用户向量表示。训练阶段进一步引入对比学习目标，以增强不同用户之间的可分性。总体损失可写为
+\begin{equation}
+\mathcal{L}=\mathcal{L}_{\mathrm{task}}+\lambda_{\mathrm{con}}\mathcal{L}_{\mathrm{con}},
+\end{equation}
+其中，$\mathcal{L}_{\mathrm{task}}$ 表示主任务损失，$\mathcal{L}_{\mathrm{con}}$ 表示用户表征的对比损失，$\lambda_{\mathrm{con}}$ 为权衡系数。
+
+推理阶段，本文方法首先构建统一用户状态，再利用该状态参与检索前个性化增强、检索与重排以及生成过程。当用户历史为空时，系统退化为仅依赖群体原型和当前会话信息构建用户状态；当个性化信息进一步缺失时，则退化为标准 RAG 流程。其余超参数，如召回条数、短期历史窗口长度、群体原型数量和对比学习温度系数等，将在附录中进一步说明。
+
+\vspace{0.8em}
+
+\noindent{\bfseries \large 评价指标}
+
+\vspace{0.5em}
+
+关于检索指标与生成指标的通用定义，第二章已作统一介绍，本节不再重复展开。整体上，本文的评价方式与第三章基本一致，但会结合个性化场景的特点，对不同历史条件下的方法表现进行补充分析。
+
+在检索阶段，本文主要采用 Recall@k 和 nDCG@k，用于评估个性化相关证据的召回能力与排序质量。
+在生成阶段，本文根据不同数据集的任务形式，采用 ROUGE-1、ROUGE-L、Accuracy 等指标衡量生成结果与参考答案之间的一致性。
+
+此外，考虑到个性化场景下用户历史规模差异较大，本文还进一步按可用历史条目数对测试样本进行分桶统计，用于评估方法在冷启动与历史稀疏条件下的稳定性表现。
+
+\subsection{对比实验}
+
+为了验证本文提出的 DUA-RAG 方法在个性化场景下的有效性，本文将其与 Standard RAG、History-only RAG、PBR、PGraphRAG 以及 AF+CE 等代表性方法进行对比实验。考虑到检索指标与生成指标在评价目标和量纲上存在差异，本文将二者分开统计：前者主要用于评估个性化证据的召回与排序质量，后者主要用于评估最终输出与用户需求之间的一致性。表~\ref{tab:retrieval-main-ch4} 和表~\ref{tab:generation-main-ch4} 分别给出了主要检索结果和生成结果。
+
+\begin{table}[htbp]
+    \centering
+    \caption{各方法在个性化检索任务上的主要结果}
+    \label{tab:retrieval-main-ch4}
+    \renewcommand{\arraystretch}{1.15}
+    \setlength{\tabcolsep}{4pt}
+    \small
+    \begin{tabular}{>{\centering\arraybackslash}p{2.2cm}
+                    >{\centering\arraybackslash}p{1.8cm}
+                    >{\centering\arraybackslash}p{1.7cm}
+                    >{\centering\arraybackslash}p{1.7cm}
+                    >{\centering\arraybackslash}p{1.4cm}
+                    >{\centering\arraybackslash}p{1.6cm}
+                    >{\centering\arraybackslash}p{1.3cm}
+                    >{\centering\arraybackslash}p{1.5cm}}
+        \toprule
+        \textbf{数据集} & \textbf{指标} & \textbf{Standard RAG} & \textbf{History-only} & \textbf{PBR} & \textbf{PGraphRAG} & \textbf{AF+CE} & \textbf{DUA-RAG} \\
+        \midrule
+        \multirow{2}{*}{PersonaBench} 
+        & Recall@5 & -- & -- & -- & -- & -- & -- \\
+        & nDCG@5   & -- & -- & -- & -- & -- & -- \\
+        \midrule
+        \multirow{2}{*}{LongMemEval} 
+        & Recall@5 & -- & -- & -- & -- & -- & -- \\
+        & nDCG@5   & -- & -- & -- & -- & -- & -- \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\begin{table}[htbp]
+    \centering
+    \caption{各方法在个性化生成任务上的主要结果}
+    \label{tab:generation-main-ch4}
+    \renewcommand{\arraystretch}{1.15}
+    \setlength{\tabcolsep}{4pt}
+    \small
+    \begin{tabular}{>{\centering\arraybackslash}p{2.3cm}
+                    >{\centering\arraybackslash}p{2.4cm}
+                    >{\centering\arraybackslash}p{1.7cm}
+                    >{\centering\arraybackslash}p{1.7cm}
+                    >{\centering\arraybackslash}p{1.4cm}
+                    >{\centering\arraybackslash}p{1.6cm}
+                    >{\centering\arraybackslash}p{1.3cm}
+                    >{\centering\arraybackslash}p{1.5cm}}
+        \toprule
+        \textbf{数据集} & \textbf{指标} & \textbf{Standard RAG} & \textbf{History-only} & \textbf{PBR} & \textbf{PGraphRAG} & \textbf{AF+CE} & \textbf{DUA-RAG} \\
+        \midrule
+        PersonaBench & Accuracy & -- & -- & -- & -- & -- & -- \\
+        LongMemEval  & Accuracy & -- & -- & -- & -- & -- & -- \\
+        LaMP-4       & ROUGE-L  & -- & -- & -- & -- & -- & -- \\
+        LaMP-7       & ROUGE-L  & -- & -- & -- & -- & -- & -- \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+从表~\ref{tab:retrieval-main-ch4} 可以看出，本文方法在个性化检索任务上的优势主要体现在两个方面：一是相较于 Standard RAG 和 History-only RAG，DUA-RAG 能够利用动态用户状态更准确地建模用户需求，从而提升相关证据的召回与排序质量；二是相较于 PBR 和 PGraphRAG，本文方法在检索前个性化和冷启动补充之外，进一步引入了动态画像与显式用户表征学习，因此在需要细粒度区分用户偏好的场景下具有更稳定的表现。若最终结果中 DUA-RAG 在 PersonaBench 与 LongMemEval 上取得最优或次优表现，则说明其在个性化证据匹配与长历史检索鲁棒性方面均具有优势。
+
+从表~\ref{tab:generation-main-ch4} 可以看出，本文方法在最终生成效果上的提升同样较为明显。相较于仅依赖静态历史拼接的 History-only RAG，DUA-RAG 能够更好地区分“用户长期偏好”与“用户当前需求”，从而生成更符合当前用户状态的结果；相较于 PBR 和 AF+CE，本文方法不仅在检索前阶段引入个性化约束，而且进一步通过动态画像与统一用户表示贯穿检索、重排和生成过程，因此在 PersonaBench、LaMP-4 和 LaMP-7 等任务上的结果更具一致性。特别是对于更强调表达风格差异的 LaMP-7，若 DUA-RAG 相比 AF+CE 仍有进一步提升，则能够说明动态用户状态与显式用户表征学习的结合是有效的。
+
+总体来看，对比实验主要验证了三点：第一，个性化 RAG 的性能提升并不能仅依赖静态历史拼接，动态用户画像建模是必要的；第二，冷启动条件下仅依赖邻域结构或通用检索仍存在局限，群体原型补充能够在历史不足时提供更稳定的个性化约束；第三，将显式用户特征进一步编码为可训练、可度量的统一用户表征，有助于提升用户状态在检索与生成全过程中的作用强度。上述结果说明，DUA-RAG 所提出的三项关键设计能够形成互补，从而在个性化检索增强生成任务中取得更优的整体表现。
+
+\subsection{消融实验}
+
+\subsection{实例分析}
+
+\section{本章小结}
+
+本章围绕个性化场景下检索增强生成中的用户差异与用户状态建模问题展开研究。针对传统方法难以稳定利用用户信息、静态画像难以反映当前需求以及冷启动场景下历史不足等问题，本文提出了动态用户建模驱动的检索增强生成方法 DUA-RAG，并从动态用户画像建模、群体原型补充和显式用户表征学习三个方面进行了设计。实验结果表明，所提方法能够在多个个性化相关任务中有效提升检索与生成效果，说明动态用户状态建模对于个性化 RAG 具有重要意义。

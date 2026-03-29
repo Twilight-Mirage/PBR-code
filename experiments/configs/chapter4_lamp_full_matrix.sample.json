@@ -1,0 +1,327 @@
+{
+  "global": {
+    "run_root": "./experiments/runs/chapter4/lamp_full",
+    "data_type": "s",
+    "run_eval": true,
+    "eval_model": "gpt-4o-mini",
+    "retrieval_model_name": "multi-qa-MiniLM-L6-cos-v1",
+    "embedding_task": "auto",
+    "gen_model_name": "qwen3.5-flash",
+    "gen_model_alias": "qwen35-flash",
+    "openai_key_env": "OPENAI_API_KEY",
+    "openai_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "llm_api_key_env": "OPENAI_API_KEY",
+    "llm_model": "qwen3.5-flash",
+    "history_format": "json",
+    "retriever_type": "flat-session",
+    "topk_context": 10,
+    "k_seed": 10,
+    "top_k_retrieval": 10,
+    "useronly": "false",
+    "cot": "false",
+    "con": "false",
+    "merge_key_expansion_into_value": "none"
+  },
+  "experiments": [
+    {
+      "name": "naive_rag_lamp4_user",
+      "model_type": "PBR",
+      "temporal_profile": false,
+      "cold_start_router": false,
+      "explicit_profile": false,
+      "save_suffix": "_exp_naive_rag_lamp4_user",
+      "args": {
+        "in_file": "./data/lamp_data/lamp_4_dev_user.json",
+        "ref_json": "./data/lamp_data/lamp_4_dev_user.json",
+        "run_eval": true
+      }
+    },
+    {
+      "name": "naive_rag_lamp4_time",
+      "model_type": "PBR",
+      "temporal_profile": false,
+      "cold_start_router": false,
+      "explicit_profile": false,
+      "save_suffix": "_exp_naive_rag_lamp4_time",
+      "args": {
+        "in_file": "./data/lamp_data/lamp_4_dev_time.json",
+        "ref_json": "./data/lamp_data/lamp_4_dev_time.json",
+        "run_eval": true
+      }
+    },
+    {
+      "name": "history_rag_lamp4_user",
+      "model_type": "PBR",
+      "temporal_profile": false,
+      "cold_start_router": false,
+      "explicit_profile": false,
+      "save_suffix": "_exp_history_rag_lamp4_user",
+      "args": {
+        "in_file": "./data/lamp_data/lamp_4_dev_user.json",
+        "ref_json": "./data/lamp_data/lamp_4_dev_user.json",
+        "run_eval": true
+      }
+    },
+    {
+      "name": "history_rag_lamp4_time",
+      "model_type": "PBR",
+      "temporal_profile": false,
+      "cold_start_router": false,
+      "explicit_profile": false,
+      "save_suffix": "_exp_history_rag_lamp4_time",
+      "args": {
+        "in_file": "./data/lamp_data/lamp_4_dev_time.json",
+        "ref_json": "./data/lamp_data/lamp_4_dev_time.json",
+        "run_eval": true
+      }
+    },
+    {
+      "name": "pbr_lamp4_user",
+      "model_type": "PBR",
+      "temporal_profile": false,
+      "cold_start_router": false,
+      "explicit_profile": false,
+      "save_suffix": "_exp_pbr_lamp4_user",
+      "args": {
+        "in_file": "./data/lamp_data/lamp_4_dev_user.json",
+        "ref_json": "./data/lamp_data/lamp_4_dev_user.json",
+        "run_eval": true
+      }
+    },
+    {
+      "name": "pbr_lamp4_time",
+      "model_type": "PBR",
+      "temporal_profile": true,
+      "cold_start_router": false,
+      "explicit_profile": false,
+      "save_suffix": "_exp_pbr_lamp4_time",
+      "args": {
+        "in_file": "./data/lamp_data/lamp_4_dev_time.json",
+        "ref_json": "./data/lamp_data/lamp_4_dev_time.json",
+        "run_eval": true,
+        "temporal_decay_lambda": 0.05,
+        "temporal_rerank_beta": 0.4,
+        "short_term_blend": 0.5
+      }
+    },
+    {
+      "name": "dua_rag_lamp4_user",
+      "model_type": "PBR++",
+      "temporal_profile": false,
+      "cold_start_router": true,
+      "explicit_profile": true,
+      "save_suffix": "_exp_dua_rag_lamp4_user",
+      "args": {
+        "in_file": "./data/lamp_data/lamp_4_dev_user.json",
+        "ref_json": "./data/lamp_data/lamp_4_dev_user.json",
+        "run_eval": true,
+        "cold_start_prototype_bank": "./data/lamp_data/prototype_bank_lamp4_user.json",
+        "cold_start_gate": "exp",
+        "cold_start_tau": 2.0,
+        "cold_start_m0": 3,
+        "cold_start_supervised_weight": 0.6,
+        "cold_start_anchor_mix": 0.35,
+        "cold_start_seed_profile_alpha": 0.2,
+        "cold_start_rerank_alpha": 0.25,
+        "explicit_profile_mix": 0.25,
+        "explicit_feature_topk": 12,
+        "contrastive_examples_k": 2,
+        "contrastive_max_words": 90,
+        "enable_short_term_state": true,
+        "short_term_window": 3,
+        "short_term_query_mix": 0.4,
+        "user_state_seed_alpha": 0.15,
+        "user_state_rerank_alpha": 0.25,
+        "contrastive_online_alpha": 0.1
+      }
+    },
+    {
+      "name": "dua_rag_lamp4_time",
+      "model_type": "PBR++",
+      "temporal_profile": true,
+      "cold_start_router": true,
+      "explicit_profile": true,
+      "save_suffix": "_exp_dua_rag_lamp4_time",
+      "args": {
+        "in_file": "./data/lamp_data/lamp_4_dev_time.json",
+        "ref_json": "./data/lamp_data/lamp_4_dev_time.json",
+        "run_eval": true,
+        "temporal_decay_lambda": 0.05,
+        "temporal_util_alpha": 4.0,
+        "temporal_rerank_beta": 0.4,
+        "temporal_graph_decay": 0.02,
+        "short_term_blend": 0.5,
+        "enable_persistent_strength": true,
+        "strength_persistence_path": "./data/lamp_data/memory_strengths_lamp4.json",
+        "cold_start_prototype_bank": "./data/lamp_data/prototype_bank_lamp4_time.json",
+        "cold_start_gate": "exp",
+        "cold_start_tau": 2.0,
+        "cold_start_m0": 3,
+        "cold_start_supervised_weight": 0.6,
+        "cold_start_anchor_mix": 0.35,
+        "cold_start_seed_profile_alpha": 0.2,
+        "cold_start_rerank_alpha": 0.25,
+        "explicit_profile_mix": 0.25,
+        "explicit_feature_topk": 12,
+        "contrastive_examples_k": 2,
+        "contrastive_max_words": 90,
+        "enable_short_term_state": true,
+        "short_term_window": 3,
+        "short_term_query_mix": 0.4,
+        "user_state_seed_alpha": 0.15,
+        "user_state_rerank_alpha": 0.25,
+        "contrastive_online_alpha": 0.1
+      }
+    },
+    {
+      "name": "naive_rag_lamp7_user",
+      "model_type": "PBR",
+      "temporal_profile": false,
+      "cold_start_router": false,
+      "explicit_profile": false,
+      "save_suffix": "_exp_naive_rag_lamp7_user",
+      "args": {
+        "in_file": "./data/lamp_data/lamp_7_dev_user.json",
+        "ref_json": "./data/lamp_data/lamp_7_dev_user.json",
+        "run_eval": true
+      }
+    },
+    {
+      "name": "naive_rag_lamp7_time",
+      "model_type": "PBR",
+      "temporal_profile": false,
+      "cold_start_router": false,
+      "explicit_profile": false,
+      "save_suffix": "_exp_naive_rag_lamp7_time",
+      "args": {
+        "in_file": "./data/lamp_data/lamp_7_dev_time.json",
+        "ref_json": "./data/lamp_data/lamp_7_dev_time.json",
+        "run_eval": true
+      }
+    },
+    {
+      "name": "history_rag_lamp7_user",
+      "model_type": "PBR",
+      "temporal_profile": false,
+      "cold_start_router": false,
+      "explicit_profile": false,
+      "save_suffix": "_exp_history_rag_lamp7_user",
+      "args": {
+        "in_file": "./data/lamp_data/lamp_7_dev_user.json",
+        "ref_json": "./data/lamp_data/lamp_7_dev_user.json",
+        "run_eval": true
+      }
+    },
+    {
+      "name": "history_rag_lamp7_time",
+      "model_type": "PBR",
+      "temporal_profile": false,
+      "cold_start_router": false,
+      "explicit_profile": false,
+      "save_suffix": "_exp_history_rag_lamp7_time",
+      "args": {
+        "in_file": "./data/lamp_data/lamp_7_dev_time.json",
+        "ref_json": "./data/lamp_data/lamp_7_dev_time.json",
+        "run_eval": true
+      }
+    },
+    {
+      "name": "pbr_lamp7_user",
+      "model_type": "PBR",
+      "temporal_profile": false,
+      "cold_start_router": false,
+      "explicit_profile": false,
+      "save_suffix": "_exp_pbr_lamp7_user",
+      "args": {
+        "in_file": "./data/lamp_data/lamp_7_dev_user.json",
+        "ref_json": "./data/lamp_data/lamp_7_dev_user.json",
+        "run_eval": true
+      }
+    },
+    {
+      "name": "pbr_lamp7_time",
+      "model_type": "PBR",
+      "temporal_profile": true,
+      "cold_start_router": false,
+      "explicit_profile": false,
+      "save_suffix": "_exp_pbr_lamp7_time",
+      "args": {
+        "in_file": "./data/lamp_data/lamp_7_dev_time.json",
+        "ref_json": "./data/lamp_data/lamp_7_dev_time.json",
+        "run_eval": true,
+        "temporal_decay_lambda": 0.05,
+        "temporal_rerank_beta": 0.4,
+        "short_term_blend": 0.5
+      }
+    },
+    {
+      "name": "dua_rag_lamp7_user",
+      "model_type": "PBR++",
+      "temporal_profile": false,
+      "cold_start_router": true,
+      "explicit_profile": true,
+      "save_suffix": "_exp_dua_rag_lamp7_user",
+      "args": {
+        "in_file": "./data/lamp_data/lamp_7_dev_user.json",
+        "ref_json": "./data/lamp_data/lamp_7_dev_user.json",
+        "run_eval": true,
+        "cold_start_prototype_bank": "./data/lamp_data/prototype_bank_lamp7_user.json",
+        "cold_start_gate": "exp",
+        "cold_start_tau": 2.0,
+        "cold_start_m0": 3,
+        "cold_start_supervised_weight": 0.6,
+        "cold_start_anchor_mix": 0.35,
+        "cold_start_seed_profile_alpha": 0.2,
+        "cold_start_rerank_alpha": 0.25,
+        "explicit_profile_mix": 0.25,
+        "explicit_feature_topk": 12,
+        "contrastive_examples_k": 2,
+        "contrastive_max_words": 90,
+        "enable_short_term_state": true,
+        "short_term_window": 3,
+        "short_term_query_mix": 0.4,
+        "user_state_seed_alpha": 0.15,
+        "user_state_rerank_alpha": 0.25,
+        "contrastive_online_alpha": 0.1
+      }
+    },
+    {
+      "name": "dua_rag_lamp7_time",
+      "model_type": "PBR++",
+      "temporal_profile": true,
+      "cold_start_router": true,
+      "explicit_profile": true,
+      "save_suffix": "_exp_dua_rag_lamp7_time",
+      "args": {
+        "in_file": "./data/lamp_data/lamp_7_dev_time.json",
+        "ref_json": "./data/lamp_data/lamp_7_dev_time.json",
+        "run_eval": true,
+        "temporal_decay_lambda": 0.05,
+        "temporal_util_alpha": 4.0,
+        "temporal_rerank_beta": 0.4,
+        "temporal_graph_decay": 0.02,
+        "short_term_blend": 0.5,
+        "enable_persistent_strength": true,
+        "strength_persistence_path": "./data/lamp_data/memory_strengths_lamp7.json",
+        "cold_start_prototype_bank": "./data/lamp_data/prototype_bank_lamp7_time.json",
+        "cold_start_gate": "exp",
+        "cold_start_tau": 2.0,
+        "cold_start_m0": 3,
+        "cold_start_supervised_weight": 0.6,
+        "cold_start_anchor_mix": 0.35,
+        "cold_start_seed_profile_alpha": 0.2,
+        "cold_start_rerank_alpha": 0.25,
+        "explicit_profile_mix": 0.25,
+        "explicit_feature_topk": 12,
+        "contrastive_examples_k": 2,
+        "contrastive_max_words": 90,
+        "enable_short_term_state": true,
+        "short_term_window": 3,
+        "short_term_query_mix": 0.4,
+        "user_state_seed_alpha": 0.15,
+        "user_state_rerank_alpha": 0.25,
+        "contrastive_online_alpha": 0.1
+      }
+    }
+  ]
+}

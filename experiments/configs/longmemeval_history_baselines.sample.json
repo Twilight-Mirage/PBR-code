@@ -1,4 +1,4 @@
-﻿{
+{
   "global": {
     "run_root": "./experiments/runs/baselines_history",
     "input_json": "./data/longmemeval_data/longmemeval_s_cleaned.json",
